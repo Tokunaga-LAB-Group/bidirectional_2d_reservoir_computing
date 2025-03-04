@@ -1,2 +1,2 @@
-# bidirectional_2D_reservoir_computing
+# Bidirectional 2D Reservoir Computing
 More details will be available soon.
