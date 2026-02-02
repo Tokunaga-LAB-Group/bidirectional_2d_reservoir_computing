@@ -8,7 +8,7 @@ from tensorflow import keras
 class Patches2Vectors(keras.layers.Layer):
     def __init__(self, patch_sizes):
         super().__init__()
-        self.Wp, self.Hp = patch_sizes[0], patch_sizes[1]
+        self.Hp, self.Wp = patch_sizes[0], patch_sizes[1]
 
     def call(self, images):
         B, H, W, C = tf.shape(images)[0], tf.shape(images)[1], tf.shape(images)[2], tf.shape(images)[3]
@@ -31,7 +31,14 @@ class Patches2Vectors(keras.layers.Layer):
 class BiESN(keras.layers.Layer):
     def __init__(self, output_dim, connectivity=0.1, leaky=0.9, spectral_radius=0.95, activation="tanh", seed=0):
         super().__init__()
-        initializer = keras.initializers.GlorotUniform(seed=seed)
+        if isinstance(seed, int):
+            forward_initializer = keras.initializers.GlorotUniform(seed=seed)
+            backward_initializer = keras.initializers.GlorotUniform(seed=seed)
+        elif isinstance(seed, (list, tuple)) and len(seed) == 2:
+            forward_initializer = keras.initializers.GlorotUniform(seed=seed[0])
+            backward_initializer = keras.initializers.GlorotUniform(seed=seed[1])
+        else:
+            raise ValueError("seeds must be int or list/tuple of two ints.")
 
         forward_esn_layer = tfa.layers.ESN(
             units=output_dim // 2,
@@ -40,8 +47,8 @@ class BiESN(keras.layers.Layer):
             spectral_radius=spectral_radius,
             activation=activation,
             return_sequences=True,
-            kernel_initializer=initializer,
-            recurrent_initializer=initializer,
+            kernel_initializer=forward_initializer,
+            recurrent_initializer=forward_initializer,
         )
 
         backward_esn_layer = tfa.layers.ESN(
@@ -51,8 +58,8 @@ class BiESN(keras.layers.Layer):
             spectral_radius=spectral_radius,
             activation=activation,
             return_sequences=True,
-            kernel_initializer=initializer,
-            recurrent_initializer=initializer,
+            kernel_initializer=backward_initializer,
+            recurrent_initializer=backward_initializer,
             go_backwards=True,
         )
 
@@ -69,11 +76,20 @@ class BiESN(keras.layers.Layer):
 
 # B x N_h x N_w x input_dim -> B x N_h x N_w x output_dim
 class BiESN2D(keras.layers.Layer):
-    def __init__(self, output_dim, connectivity=0.1, leaky=0.9, spectral_radius=0.95, activation="tanh"):
+    def __init__(self, output_dim, connectivity=0.1, leaky=0.9, spectral_radius=0.95, activation="tanh", seed=0):
         super().__init__()
+        if isinstance(seed, int):
+            v_seed = (seed, seed)
+            h_seed = (seed, seed)
+        elif isinstance(seed, (list, tuple)) and len(seed) == 4:
+            v_seed = (int(seed[0]), int(seed[1]))
+            h_seed = (int(seed[2]), int(seed[3]))
+        else:
+            raise ValueError("seeds must be int or list/tuple of four ints.")
+
         self.D = output_dim
-        self.vertical_bi_esn_layer = BiESN(output_dim // 2, connectivity, leaky, spectral_radius, activation)
-        self.horizontal_bi_esn_layer = BiESN(output_dim // 2, connectivity, leaky, spectral_radius, activation)
+        self.vertical_bi_esn_layer = BiESN(output_dim // 2, connectivity, leaky, spectral_radius, activation, v_seed)
+        self.horizontal_bi_esn_layer = BiESN(output_dim // 2, connectivity, leaky, spectral_radius, activation, h_seed)
 
     def call(self, inputs):
         B, N_h, N_w, C = tf.shape(inputs)[0], tf.shape(inputs)[1], tf.shape(inputs)[2], tf.shape(inputs)[3]

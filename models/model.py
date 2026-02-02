@@ -1,10 +1,102 @@
 # TF/Keras
+# from tensorflow import keras
 import numpy as np
 import tensorflow as tf
+import tensorflow_addons as tfa
 from tensorflow import keras
 
 # Custom
 from models import modules
+
+
+def get_classifier(
+    input_shape,
+    num_classes,
+    patch_sizes=(4, 4),
+    model_type="esn",
+    units=256,
+    connectivity=0.1,
+    leaky=0.9,
+    spectral_radius=0.95,
+    seed=0,
+):
+    H, W, C = input_shape
+    Hp, Wp = patch_sizes
+    Nh, Nw = H // Hp, W // Wp
+    T = Nh * Nw
+    D = Hp * Wp * C
+
+    match model_type:
+        case "esn":
+            classifier = keras.Sequential(
+                [
+                    keras.layers.Input(shape=input_shape),  # (B, H, W, C)
+                    modules.Patches2Vectors(patch_sizes),  # (B, N_h, N_w, D)
+                    keras.layers.Reshape((T, D)),  # (B, T, D)
+                    tfa.layers.ESN(
+                        units=units,
+                        connectivity=connectivity,
+                        leaky=leaky,
+                        spectral_radius=spectral_radius,
+                        activation="tanh",
+                        return_sequences=True,
+                        kernel_initializer=keras.initializers.GlorotUniform(seed=seed),
+                        recurrent_initializer=keras.initializers.GlorotUniform(seed=seed),
+                    ),  # (B, T, units)
+                    keras.layers.GlobalAveragePooling1D(),  # (B, units)
+                    keras.layers.Dense(
+                        num_classes,
+                        use_bias=False,
+                        trainable=False,
+                    ),  # (B, num_classes)
+                ]
+            )
+        case "bi_esn":
+            classifier = keras.Sequential(
+                [
+                    keras.layers.Input(shape=input_shape),  # (B, H, W, C)
+                    modules.Patches2Vectors(patch_sizes),  # (B, N_h, N_w, D)
+                    keras.layers.Reshape((T, D)),  # (B, T, D)
+                    modules.BiESN(
+                        output_dim=units,
+                        connectivity=connectivity,
+                        leaky=leaky,
+                        spectral_radius=spectral_radius,
+                        activation="tanh",
+                        seed=seed,
+                    ),  # (B, T, units)
+                    keras.layers.GlobalAveragePooling1D(),  # (B, units)
+                    keras.layers.Dense(
+                        num_classes,
+                        use_bias=False,
+                        trainable=False,
+                    ),  # (B, num_classes)
+                ]
+            )
+        case "bi_esn2d":
+            classifier = keras.Sequential(
+                [
+                    keras.layers.Input(shape=input_shape),  # (B, H, W, C)
+                    modules.Patches2Vectors(patch_sizes),  # (B, N_h, N_w, D)
+                    modules.BiESN2D(
+                        output_dim=units,
+                        connectivity=connectivity,
+                        leaky=leaky,
+                        spectral_radius=spectral_radius,
+                        activation="tanh",
+                        seed=seed,
+                    ),  # (B, N_h, N_w, units)
+                    keras.layers.GlobalAveragePooling2D(),  # (B, units)
+                    keras.layers.Dense(
+                        num_classes,
+                        use_bias=False,
+                        trainable=False,
+                    ),  # (B, num_classes)
+                ]
+            )
+        case _:
+            raise ValueError("Select model: esn, bi_esn, or bi_esn2d.")
+    return classifier
 
 
 def get_feature_extractor(input_shape, output_shape, model_type="cnn", **kwargs):
