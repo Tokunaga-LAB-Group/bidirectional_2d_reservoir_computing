@@ -13,7 +13,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 sys.path.append(os.getcwd())
 sys.path.append("..")
@@ -21,10 +21,8 @@ warnings.filterwarnings("ignore")
 
 import numpy as np
 import optuna
-import tensorflow as tf
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import StratifiedKFold
-from tensorflow import keras
 
 
 # -------------------------
@@ -181,6 +179,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="All-in-one ESN Optuna + CV + seed runner.")
 
     # Core experiment
+    p.add_argument("--gpu", type=int, default=0, help="GPU ID to use.")
     p.add_argument("--dataset", type=str, default="cifar10", choices=["mnist", "cifar_10"])
     p.add_argument("--model_type", type=str, default="esn", choices=["esn", "bi_esn", "bi_esn2d"])
     p.add_argument("--N_cv", type=int, default=5, help="Number of stratified folds.")
@@ -293,6 +292,10 @@ def suggest_params(trial: optuna.Trial, args: argparse.Namespace) -> Dict[str, A
 
 def main() -> None:
     args = parse_args()
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    import tensorflow as tf
+    from tensorflow import keras
 
     # Environment / imports
     sys.path.append(os.path.abspath(args.project_root))
