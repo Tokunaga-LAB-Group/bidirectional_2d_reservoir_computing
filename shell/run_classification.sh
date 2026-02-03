@@ -6,7 +6,7 @@ set -e
 #######################################
 DATASETS=(
   "cifar_10"
-  # "mnist"
+  "mnist"
   )
 MODEL_TYPES=("esn" "bi_esn" "bi_esn2d")
 
@@ -28,7 +28,7 @@ TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 for DATASET in "${DATASETS[@]}"; do
   for MODEL_TYPE in "${MODEL_TYPES[@]}"; do
 
-    SAVE_NAME="${TIMESTAMP}_${DATASET}_${MODEL_TYPE}_units-1024"
+    SAVE_NAME="${TIMESTAMP}_${DATASET}_${MODEL_TYPE}_units-128"
     EXP_SAVE_PATH="${SAVE_PATH}/${SAVE_NAME}"
     EXP_LOG_PATH="${LOG_PATH}/${SAVE_NAME}"
     LOG_FILE="${EXP_LOG_PATH}/run.log"
@@ -44,13 +44,15 @@ for DATASET in "${DATASETS[@]}"; do
     mkdir -p "${EXP_LOG_PATH}"
 
     python "${PYTHON_SCRIPT}" \
-      --gpu 7 \
+      --gpu 4 \
       --dataset "${DATASET}" \
       --model_type "${MODEL_TYPE}" \
       --N_cv "${N_CV}" \
       --N_seed "${N_SEED}" \
       --n_trials "${N_TRIALS}" \
-      --units 1024 \
+      --units 128 \
+      --patch_h 1 \
+      --patch_w 1 \
       --save_name "${EXP_SAVE_PATH}" \
       --tune_connectivity \
       --tune_leaky \

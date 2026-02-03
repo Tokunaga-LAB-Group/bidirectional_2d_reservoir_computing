@@ -23,6 +23,8 @@ import numpy as np
 import optuna
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import StratifiedKFold
+import tensorflow as tf
+from tensorflow import keras
 
 
 # -------------------------
@@ -294,8 +296,6 @@ def main() -> None:
     args = parse_args()
 
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
-    import tensorflow as tf
-    from tensorflow import keras
 
     # Environment / imports
     sys.path.append(os.path.abspath(args.project_root))
