@@ -13,7 +13,6 @@ import warnings
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 sys.path.append(os.getcwd())
 sys.path.append("..")
@@ -21,9 +20,10 @@ warnings.filterwarnings("ignore")
 
 import numpy as np
 import optuna
+import tensorflow as tf
+import tensorflow_datasets as tfds
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import StratifiedKFold
-import tensorflow as tf
 from tensorflow import keras
 
 
@@ -52,6 +52,19 @@ def load_dataset(name: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndar
         (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
         y_train = y_train.squeeze()
         y_test = y_test.squeeze()
+        num_classes = 10
+    elif name == "stl_10":
+        ds_train = tfds.load("stl10", split="train", as_supervised=True, batch_size=-1)
+        ds_test = tfds.load("stl10", split="test", as_supervised=True, batch_size=-1)
+
+        (x_train, y_train) = tfds.as_numpy(ds_train)
+        (x_test, y_test) = tfds.as_numpy(ds_test)
+
+        # 念のため dtype を揃える（STL-10 は uint8 画像・int64 ラベルになりがち）
+        x_train = x_train.astype(np.uint8)
+        x_test = x_test.astype(np.uint8)
+        y_train = y_train.astype(np.int64)
+        y_test = y_test.astype(np.int64)
         num_classes = 10
     else:
         raise ValueError(f"Unknown dataset: {name}. Use mnist or cifar10.")
@@ -182,7 +195,7 @@ def parse_args() -> argparse.Namespace:
 
     # Core experiment
     p.add_argument("--gpu", type=int, default=0, help="GPU ID to use.")
-    p.add_argument("--dataset", type=str, default="cifar10", choices=["mnist", "cifar_10"])
+    p.add_argument("--dataset", type=str, default="cifar10", choices=["mnist", "cifar_10", "stl_10"])
     p.add_argument("--model_type", type=str, default="esn", choices=["esn", "bi_esn", "bi_esn2d"])
     p.add_argument("--N_cv", type=int, default=5, help="Number of stratified folds.")
     p.add_argument("--N_seed", type=int, default=5, help="Number of reservoir seeds.")

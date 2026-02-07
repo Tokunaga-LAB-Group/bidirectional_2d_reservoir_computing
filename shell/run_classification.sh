@@ -5,8 +5,9 @@ set -e
 # Global settings
 #######################################
 DATASETS=(
-  "cifar_10"
-  "mnist"
+  # "cifar_10"
+  # "mnist"
+  "stl_10"
   )
 MODEL_TYPES=("esn" "bi_esn" "bi_esn2d")
 
@@ -44,15 +45,15 @@ for DATASET in "${DATASETS[@]}"; do
     mkdir -p "${EXP_LOG_PATH}"
 
     python "${PYTHON_SCRIPT}" \
-      --gpu 4 \
+      --gpu 0 \
       --dataset "${DATASET}" \
       --model_type "${MODEL_TYPE}" \
       --N_cv "${N_CV}" \
       --N_seed "${N_SEED}" \
       --n_trials "${N_TRIALS}" \
       --units 128 \
-      --patch_h 1 \
-      --patch_w 1 \
+      --patch_h 16 \
+      --patch_w 16 \
       --save_name "${EXP_SAVE_PATH}" \
       --tune_connectivity \
       --tune_leaky \
