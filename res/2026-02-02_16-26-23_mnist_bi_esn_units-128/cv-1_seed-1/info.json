@@ -1,0 +1,16 @@
+{
+  "dataset": "mnist",
+  "seed": 1,
+  "seed_index": 1,
+  "cv_id": 1,
+  "N_cv": 5,
+  "N_seed": 3,
+  "train_size": 48000,
+  "val_size": 12000,
+  "test_size": 10000,
+  "num_classes": 10,
+  "optuna_metric": "acc",
+  "n_trials": 30,
+  "timestamp": "2026-02-02T19:41:33.378187",
+  "elapsed_sec": 1735.162353
+}

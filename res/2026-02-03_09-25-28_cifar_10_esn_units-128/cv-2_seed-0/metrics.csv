@@ -1,0 +1,2 @@
+seed,cv_id,val_metric,val_score,test_acc,test_macro_f1,test_top5,best_trial,timestamp
+0,2,acc,0.4046,0.4148,0.4059432878974727,0.875,21,2026-02-03T10:16:19.140258

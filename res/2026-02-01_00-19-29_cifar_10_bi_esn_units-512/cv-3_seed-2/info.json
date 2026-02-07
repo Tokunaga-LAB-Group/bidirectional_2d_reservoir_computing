@@ -1,0 +1,16 @@
+{
+  "dataset": "cifar_10",
+  "seed": 2,
+  "seed_index": 2,
+  "cv_id": 3,
+  "N_cv": 5,
+  "N_seed": 3,
+  "train_size": 40000,
+  "val_size": 10000,
+  "test_size": 10000,
+  "num_classes": 10,
+  "optuna_metric": "acc",
+  "n_trials": 30,
+  "timestamp": "2026-02-01T13:04:35.803701",
+  "elapsed_sec": 2074.330013
+}

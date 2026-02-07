@@ -1,0 +1,16 @@
+{
+  "dataset": "stl_10",
+  "seed": 1,
+  "seed_index": 1,
+  "cv_id": 4,
+  "N_cv": 5,
+  "N_seed": 3,
+  "train_size": 4000,
+  "val_size": 1000,
+  "test_size": 8000,
+  "num_classes": 10,
+  "optuna_metric": "acc",
+  "n_trials": 30,
+  "timestamp": "2026-02-07T11:51:13.423212",
+  "elapsed_sec": 99.122167
+}

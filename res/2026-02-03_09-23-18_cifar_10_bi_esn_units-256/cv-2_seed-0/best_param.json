@@ -1,0 +1,30 @@
+{
+  "best_value": 0.3307,
+  "best_trial_number": 2,
+  "best_trial_params": {
+    "connectivity": 0.26420425316672436,
+    "leaky": 0.964648098788107,
+    "spectral_radius": 0.6560987867011486,
+    "beta": 0.00021618261203953774
+  },
+  "resolved_hyperparams": {
+    "model_type": "bi_esn",
+    "patch_h": 4,
+    "patch_w": 4,
+    "units": 256,
+    "connectivity": 0.26420425316672436,
+    "leaky": 0.964648098788107,
+    "spectral_radius": 0.6560987867011486,
+    "beta": 0.00021618261203953774
+  },
+  "fixed_defaults": {
+    "patch_h": 4,
+    "patch_w": 4,
+    "units": 256,
+    "connectivity": 0.1,
+    "leaky": 0.9,
+    "spectral_radius": 0.95,
+    "beta": 0.001,
+    "model_type": "bi_esn"
+  }
+}
