@@ -5,11 +5,15 @@ set -e
 # Global settings
 #######################################
 DATASETS=(
-  # "cifar_10"
-  # "mnist"
+  "cifar_10"
+  "mnist"
   "stl_10"
   )
-MODEL_TYPES=("esn" "bi_esn" "bi_esn2d")
+MODEL_TYPES=(
+  "esn" 
+  "bi_esn" 
+  "bi_esn2d"
+  )
 
 N_CV=5
 N_SEED=3
@@ -29,7 +33,7 @@ TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 for DATASET in "${DATASETS[@]}"; do
   for MODEL_TYPE in "${MODEL_TYPES[@]}"; do
 
-    SAVE_NAME="${TIMESTAMP}_${DATASET}_${MODEL_TYPE}_units-128"
+    SAVE_NAME="${TIMESTAMP}_${DATASET}_${MODEL_TYPE}_units-512_ps1x1"
     EXP_SAVE_PATH="${SAVE_PATH}/${SAVE_NAME}"
     EXP_LOG_PATH="${LOG_PATH}/${SAVE_NAME}"
     LOG_FILE="${EXP_LOG_PATH}/run.log"
@@ -51,9 +55,9 @@ for DATASET in "${DATASETS[@]}"; do
       --N_cv "${N_CV}" \
       --N_seed "${N_SEED}" \
       --n_trials "${N_TRIALS}" \
-      --units 128 \
-      --patch_h 16 \
-      --patch_w 16 \
+      --units 512 \
+      --patch_h 1 \
+      --patch_w 1 \
       --save_name "${EXP_SAVE_PATH}" \
       --tune_connectivity \
       --tune_leaky \
