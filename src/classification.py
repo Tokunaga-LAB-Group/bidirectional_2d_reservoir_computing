@@ -40,7 +40,9 @@ def set_global_determinism(seed: int) -> None:
 # -------------------------
 # Data
 # -------------------------
-def load_dataset(name: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+def load_dataset(
+    name: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
     """Return x_train, y_train_int, x_test, y_test_int, num_classes."""
     name = name.lower()
     if name == "mnist":
@@ -195,11 +197,20 @@ def parse_args() -> argparse.Namespace:
 
     # Core experiment
     p.add_argument("--gpu", type=int, default=0, help="GPU ID to use.")
-    p.add_argument("--dataset", type=str, default="cifar10", choices=["mnist", "cifar_10", "stl_10"])
-    p.add_argument("--model_type", type=str, default="esn", choices=["esn", "bi_esn", "bi_esn2d"])
+    p.add_argument(
+        "--dataset",
+        type=str,
+        default="cifar10",
+        choices=["mnist", "cifar_10", "stl_10"],
+    )
+    p.add_argument(
+        "--model_type", type=str, default="esn", choices=["esn", "bi_esn", "bi_esn2d"]
+    )
     p.add_argument("--N_cv", type=int, default=5, help="Number of stratified folds.")
     p.add_argument("--N_seed", type=int, default=5, help="Number of reservoir seeds.")
-    p.add_argument("--n_trials", type=int, default=30, help="Optuna trials per (seed, fold).")
+    p.add_argument(
+        "--n_trials", type=int, default=30, help="Optuna trials per (seed, fold)."
+    )
 
     # Fixed/default hyperparameters (can be tuned if flags enabled)
     p.add_argument("--patch_h", type=int, default=4)
@@ -223,15 +234,25 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Limits for quick tests
-    p.add_argument("--limit_train", type=int, default=0, help="Use only first N train samples (debug).")
+    p.add_argument(
+        "--limit_train",
+        type=int,
+        default=0,
+        help="Use only first N train samples (debug).",
+    )
 
     # Saving
     p.add_argument("--save_name", type=str, default="runs/exp_allinone")
-    p.add_argument("--overwrite", action="store_true", help="Overwrite existing fold/seed dirs.")
+    p.add_argument(
+        "--overwrite", action="store_true", help="Overwrite existing fold/seed dirs."
+    )
 
     # Optional optuna storage (sqlite etc.)
     p.add_argument(
-        "--study_storage", type=str, default="", help="Optuna storage URL e.g. sqlite:///study.db (optional)."
+        "--study_storage",
+        type=str,
+        default="",
+        help="Optuna storage URL e.g. sqlite:///study.db (optional).",
     )
     p.add_argument("--sampler", type=str, default="tpe", choices=["tpe", "random"])
     p.add_argument("--pruner", type=str, default="median", choices=["none", "median"])
@@ -247,12 +268,18 @@ def parse_args() -> argparse.Namespace:
 
     # Base seed for determinism of non-reservoir randomness (data shuffling etc.)
     p.add_argument(
-        "--base_seed", type=int, default=0, help="Base seed (used to derive per-reservoir seed = base_seed + s)."
+        "--base_seed",
+        type=int,
+        default=0,
+        help="Base seed (used to derive per-reservoir seed = base_seed + s).",
     )
 
     # project root for imports
     p.add_argument(
-        "--project_root", type=str, default=".", help="Project root to add to sys.path so 'import models' works."
+        "--project_root",
+        type=str,
+        default=".",
+        help="Project root to add to sys.path so 'import models' works.",
     )
 
     return p.parse_args()
@@ -280,7 +307,11 @@ def suggest_params(trial: optuna.Trial, args: argparse.Namespace) -> Dict[str, A
         hp["patch_h"], hp["patch_w"] = int(args.patch_h), int(args.patch_w)
 
     # units
-    hp["units"] = int(trial.suggest_int("units", 128, 2048, log=True)) if args.tune_units else int(args.units)
+    hp["units"] = (
+        int(trial.suggest_int("units", 128, 2048, log=True))
+        if args.tune_units
+        else int(args.units)
+    )
 
     # connectivity
     hp["connectivity"] = (
@@ -290,7 +321,11 @@ def suggest_params(trial: optuna.Trial, args: argparse.Namespace) -> Dict[str, A
     )
 
     # leaky
-    hp["leaky"] = float(trial.suggest_float("leaky", 0.5, 1.0)) if args.tune_leaky else float(args.leaky)
+    hp["leaky"] = (
+        float(trial.suggest_float("leaky", 0.5, 1.0))
+        if args.tune_leaky
+        else float(args.leaky)
+    )
 
     # spectral radius
     hp["spectral_radius"] = (
@@ -300,7 +335,11 @@ def suggest_params(trial: optuna.Trial, args: argparse.Namespace) -> Dict[str, A
     )
 
     # ridge beta
-    hp["beta"] = float(trial.suggest_float("beta", 1e-5, 1e-3, log=True)) if args.tune_beta else float(args.beta)
+    hp["beta"] = (
+        float(trial.suggest_float("beta", 1e-5, 1e-3, log=True))
+        if args.tune_beta
+        else float(args.beta)
+    )
 
     return hp
 
@@ -326,7 +365,10 @@ def main() -> None:
     save_root = Path(args.save_name)
     save_root.mkdir(parents=True, exist_ok=True)
 
-    print(f"[INFO] dataset={args.dataset} train={len(x_train)} test={len(x_test)} classes={num_classes}", flush=True)
+    print(
+        f"[INFO] dataset={args.dataset} train={len(x_train)} test={len(x_test)} classes={num_classes}",
+        flush=True,
+    )
     print(
         f"[INFO] model_type(default)={args.model_type} N_seed={args.N_seed} N_cv={args.N_cv} trials={args.n_trials}",
         flush=True,
@@ -348,15 +390,25 @@ def main() -> None:
         reservoir_seed = int(args.base_seed + s)
         set_global_determinism(reservoir_seed)
 
-        skf = StratifiedKFold(n_splits=args.N_cv, shuffle=True, random_state=reservoir_seed)
+        skf = StratifiedKFold(
+            n_splits=args.N_cv, shuffle=True, random_state=reservoir_seed
+        )
 
-        print(f"\n[SEED] s={s}/{args.N_seed-1} reservoir_seed={reservoir_seed}", flush=True)
+        print(
+            f"\n[SEED] s={s}/{args.N_seed-1} reservoir_seed={reservoir_seed}",
+            flush=True,
+        )
 
         for cv_id, (tr_idx, va_idx) in enumerate(skf.split(x_train, y_train_int)):
             fold_dir = save_root / f"cv-{cv_id}_seed-{reservoir_seed}"
             if fold_dir.exists() and args.overwrite:
                 # remove minimal files only (keep safety)
-                for fn in ["info.json", "best_param.json", "metrics.csv", "model_weights.npz"]:
+                for fn in [
+                    "info.json",
+                    "best_param.json",
+                    "metrics.csv",
+                    "model_weights.npz",
+                ]:
                     p = fold_dir / fn
                     if p.exists():
                         p.unlink()
@@ -374,6 +426,8 @@ def main() -> None:
 
             # Build function
             def build_classifier(hp: Dict[str, Any]) -> keras.Model:
+                set_global_determinism(reservoir_seed)
+
                 return models.model.get_classifier(
                     input_shape=(H, W, C),
                     num_classes=num_classes,
@@ -407,14 +461,27 @@ def main() -> None:
                 hp = suggest_params(trial, args)
 
                 model = build_classifier(hp)
-                model, _ = fit_ridge_readout(model, x_tr, y_tr_oh, beta=hp["beta"], batch_size=args.batch_size)
+                model, _ = fit_ridge_readout(
+                    model, x_tr, y_tr_oh, beta=hp["beta"], batch_size=args.batch_size
+                )
 
-                val_metrics = evaluate_model(model, x_va, y_va, num_classes=num_classes, batch_size=args.batch_size)
+                val_metrics = evaluate_model(
+                    model,
+                    x_va,
+                    y_va,
+                    num_classes=num_classes,
+                    batch_size=args.batch_size,
+                )
                 score = float(val_metrics[args.optuna_metric])
 
                 print(
                     "seed={} cv={} trial={} val_acc={:.4f} val_f1={:.4f} score={:.4f}".format(
-                        reservoir_seed, cv_id, trial.number, val_metrics["acc"], val_metrics["macro_f1"], score
+                        reservoir_seed,
+                        cv_id,
+                        trial.number,
+                        val_metrics["acc"],
+                        val_metrics["macro_f1"],
+                        score,
                     ),
                     flush=True,
                 )
@@ -429,7 +496,9 @@ def main() -> None:
             study.optimize(objective, n_trials=args.n_trials)
 
             best_trial = study.best_trial
-            best_hp = suggest_params(best_trial, args)  # will use best params where tuned
+            best_hp = suggest_params(
+                best_trial, args
+            )  # will use best params where tuned
             # Override with actual best params (they are a subset)
             for k, v in best_trial.params.items():
                 if k == "patch":
@@ -445,11 +514,19 @@ def main() -> None:
             # Refit best on fold-train, evaluate on test
             best_model = build_classifier(best_hp)
             best_model, W_T = fit_ridge_readout(
-                best_model, x_tr, y_tr_oh, beta=float(best_hp["beta"]), batch_size=args.batch_size
+                best_model,
+                x_tr,
+                y_tr_oh,
+                beta=float(best_hp["beta"]),
+                batch_size=args.batch_size,
             )
 
             test_metrics = evaluate_model(
-                best_model, x_test, y_test_int, num_classes=num_classes, batch_size=args.batch_size
+                best_model,
+                x_test,
+                y_test_int,
+                num_classes=num_classes,
+                batch_size=args.batch_size,
             )
 
             end_t = dt.datetime.now()

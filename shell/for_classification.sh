@@ -10,7 +10,7 @@ LOG_FILE="${LOG_DIR}/launch_${TIMESTAMP}.log"
 echo "[INFO] Launching run_all_experiments.sh with nohup"
 echo "[INFO] Launcher log: ${LOG_FILE}"
 
-nohup bash shell/run_classification.sh > "${LOG_FILE}" 2>&1 &
+nohup bash shell/run_classification2.sh > "${LOG_FILE}" 2>&1 &
 
 PID=$!
 
