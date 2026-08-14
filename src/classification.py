@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import argparse
@@ -11,20 +9,19 @@ import random
 import sys
 import warnings
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any
 
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 sys.path.append(os.getcwd())
 sys.path.append("..")
 warnings.filterwarnings("ignore")
 
 import numpy as np
 import optuna
-import tensorflow as tf
-import tensorflow_datasets as tfds
+import torch
+import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import StratifiedKFold
-from tensorflow import keras
+from torchvision import datasets
 
 
 # -------------------------
@@ -34,7 +31,8 @@ def set_global_determinism(seed: int) -> None:
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
-    tf.random.set_seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 # -------------------------
@@ -42,40 +40,86 @@ def set_global_determinism(seed: int) -> None:
 # -------------------------
 def load_dataset(
     name: str,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
-    """Return x_train, y_train_int, x_test, y_test_int, num_classes."""
+    data_root: str,
+) -> tuple[torch.Tensor, np.ndarray, torch.Tensor, np.ndarray, int]:
+    """Return x_train, y_train_int, x_test, y_test_int, num_classes.
+
+    x は (N, C, H, W) の uint8 テンソル。バッチに切り出す時点で float [0, 1] に直す
+    (STL-10 を float32 で全部持つと 1.4 GB 程度になるため)。
+    """
     name = name.lower()
+    root = os.path.expanduser(data_root)
+
     if name == "mnist":
-        (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
-        x_train = x_train[..., None]
-        x_test = x_test[..., None]
+        train = datasets.MNIST(root, train=True, download=True)
+        test = datasets.MNIST(root, train=False, download=True)
+
+        # (N, H, W) -> (N, 1, H, W)
+        x_train, x_test = train.data.unsqueeze(1), test.data.unsqueeze(1)
+        y_train, y_test = train.targets, test.targets
         num_classes = 10
     elif name == "cifar_10":
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
-        y_train = y_train.squeeze()
-        y_test = y_test.squeeze()
+        train = datasets.CIFAR10(root, train=True, download=True)
+        test = datasets.CIFAR10(root, train=False, download=True)
+
+        # (N, H, W, C) -> (N, C, H, W)
+        x_train = torch.from_numpy(train.data).permute(0, 3, 1, 2).contiguous()
+        x_test = torch.from_numpy(test.data).permute(0, 3, 1, 2).contiguous()
+        y_train, y_test = torch.tensor(train.targets), torch.tensor(test.targets)
         num_classes = 10
     elif name == "stl_10":
-        ds_train = tfds.load("stl10", split="train", as_supervised=True, batch_size=-1)
-        ds_test = tfds.load("stl10", split="test", as_supervised=True, batch_size=-1)
+        train = datasets.STL10(root, split="train", download=True)
+        test = datasets.STL10(root, split="test", download=True)
 
-        (x_train, y_train) = tfds.as_numpy(ds_train)
-        (x_test, y_test) = tfds.as_numpy(ds_test)
-
-        # 念のため dtype を揃える（STL-10 は uint8 画像・int64 ラベルになりがち）
-        x_train = x_train.astype(np.uint8)
-        x_test = x_test.astype(np.uint8)
-        y_train = y_train.astype(np.int64)
-        y_test = y_test.astype(np.int64)
+        # STL-10 は最初から (N, C, H, W)
+        x_train, x_test = torch.from_numpy(train.data), torch.from_numpy(test.data)
+        y_train, y_test = torch.from_numpy(train.labels), torch.from_numpy(test.labels)
         num_classes = 10
     else:
-        raise ValueError(f"Unknown dataset: {name}. Use mnist or cifar10.")
+        raise ValueError(f"Unknown dataset: {name}. Use mnist, cifar_10 or stl_10.")
 
-    x_train = x_train.astype("float32") / 255.0
-    x_test = x_test.astype("float32") / 255.0
-    y_train = y_train.astype("int64").reshape(-1)
-    y_test = y_test.astype("int64").reshape(-1)
+    y_train = y_train.to(torch.int64).reshape(-1).numpy()
+    y_test = y_test.to(torch.int64).reshape(-1).numpy()
+
     return x_train, y_train, x_test, y_test, num_classes
+
+
+def iter_batches(x: torch.Tensor, batch_size: int, device: torch.device):
+    """uint8 の画像をバッチごとに device へ載せ、float [0, 1] に正規化して流す。"""
+    for i in range(0, len(x), batch_size):
+        yield x[i : i + batch_size].to(device).float().div_(255.0)
+
+
+# -------------------------
+# Model
+# -------------------------
+def classifier_kwargs(model_type: str, hp: dict[str, Any]) -> dict[str, Any]:
+    """共通のハイパーパラメータを、モデルごとの引数名へ振り分ける。
+
+    NOTE: Optuna の探索範囲はリザバー系 (esn / bi_esn / bi_esn2d) に合わせてある。
+          reservoir_conv2d の units はリザバー 1 本あたりの値なので --tune_units の範囲
+          (128-2048) は大きすぎる。このモデルでは --units を固定して使うこと。
+    """
+    if model_type in ("esn", "bi_esn", "bi_esn2d"):
+        return {
+            "patch_sizes": (hp["patch_h"], hp["patch_w"]),
+            "units": hp["units"],
+            "connectivity": hp["connectivity"],
+            "leaky": hp["leaky"],
+            "spectral_radius": hp["spectral_radius"],
+        }
+    if model_type == "conv2d":
+        return {"filters": hp["units"], "kernel_size": hp["kernel_size"], "activations": hp["activation"]}
+    if model_type == "reservoir_conv2d":
+        return {
+            "num_reservoirs": hp["num_reservoirs"],
+            "units": hp["units"],
+            "kernel_size": hp["kernel_size"],
+            "connectivity": hp["connectivity"],
+            "spectral_radius": hp["spectral_radius"],
+        }
+
+    raise ValueError(f"Unknown model_type: {model_type}.")
 
 
 # -------------------------
@@ -90,14 +134,16 @@ def topk_accuracy(logits: np.ndarray, y_true: np.ndarray, k: int = 5) -> float:
     return float(np.mean([int(y_true[i]) in topk[i] for i in range(len(y_true))]))
 
 
+@torch.no_grad()
 def evaluate_model(
-    model: keras.Model,
-    x: np.ndarray,
+    model: torch.nn.Module,
+    x: torch.Tensor,
     y_true: np.ndarray,
     num_classes: int,
     batch_size: int,
-) -> Dict[str, float]:
-    logits = model.predict(x, batch_size=batch_size, verbose=0)
+    device: torch.device,
+) -> dict[str, float]:
+    logits = torch.cat([model(xb).cpu() for xb in iter_batches(x, batch_size, device)]).numpy()
     y_pred = np.argmax(logits, axis=1)
     acc = float(accuracy_score(y_true, y_pred))
     macro_f1 = float(f1_score(y_true, y_pred, average="macro"))
@@ -108,52 +154,52 @@ def evaluate_model(
 # -------------------------
 # Ridge readout
 # -------------------------
+@torch.no_grad()
 def fit_ridge_readout(
-    model: keras.Model,
-    x: np.ndarray,
-    y_onehot: np.ndarray,
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    y_onehot: torch.Tensor,
     beta: float,
     batch_size: int,
-) -> Tuple[keras.Model, np.ndarray]:
-    """Fit ridge readout and set the last Dense kernel. Returns (model, W_T)."""
-    # Ensure model is built
-    _ = model(np.empty((1,) + x.shape[1:], dtype=np.float32), training=False)
+    device: torch.device,
+) -> tuple[torch.nn.Module, np.ndarray]:
+    """Fit ridge readout and set the readout kernel. Returns (model, W_T).
 
-    # Feature extractor: penultimate layer
-    fe = keras.Model(inputs=model.inputs, outputs=model.layers[-2].output)
-
-    # Determine dimensions
-    z0 = fe(tf.convert_to_tensor(x[:1], dtype=tf.float32), training=False)
-    D = int(z0.shape[-1])
+    NOTE: 正規方程式は float64 で溜める。(D, D) は大きくても 2048^2 なのでコストは無視できる一方、
+          float32 のまま全データを足し込むと ZTZ で桁落ちする。
+    """
+    D = int(model.feature_dim)
     K = int(y_onehot.shape[-1])
 
-    ZTZ = tf.zeros((D, D), dtype=tf.float32)
-    YTZ = tf.zeros((K, D), dtype=tf.float32)
+    ZTZ = torch.zeros(D, D, dtype=torch.float64, device=device)
+    YTZ = torch.zeros(K, D, dtype=torch.float64, device=device)
 
-    ds = tf.data.Dataset.from_tensor_slices((x, y_onehot)).batch(batch_size)
-    for xb, yb in ds:
-        xb = tf.cast(xb, tf.float32)
-        yb = tf.cast(yb, tf.float32)
-        zb = fe(xb, training=False)  # (B, D)
-        ZTZ += tf.matmul(zb, zb, transpose_a=True)  # (D, D)
-        YTZ += tf.matmul(yb, zb, transpose_a=True)  # (K, D)
+    start = 0
+    for xb in iter_batches(x, batch_size, device):
+        yb = y_onehot[start : start + len(xb)].to(device).double()
+        zb = model.features(xb).double()  # (B, D)
 
-    reg = beta * tf.eye(D, dtype=tf.float32)
-    W_T = tf.linalg.solve(ZTZ + reg, tf.transpose(YTZ))  # (D, K)
+        ZTZ += zb.T @ zb  # (D, D)
+        YTZ += yb.T @ zb  # (K, D)
+        start += len(xb)
 
-    # Last layer is Dense(use_bias=False) => only kernel
-    model.layers[-1].set_weights([W_T.numpy()])
-    return model, W_T.numpy()
+    reg = beta * torch.eye(D, dtype=torch.float64, device=device)
+    W_T = torch.linalg.solve(ZTZ + reg, YTZ.T).float()  # (D, K)
+
+    # 読み出しは LinearReadout (バイアスなし・非訓練) なので kernel だけを差し込む
+    model.readout.set_kernel(W_T)
+
+    return model, W_T.cpu().numpy()
 
 
 # -------------------------
 # Saving
 # -------------------------
-def write_json(path: Path, obj: Dict[str, Any]) -> None:
+def write_json(path: Path, obj: dict[str, Any]) -> None:
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def write_metrics_csv(path: Path, row: Dict[str, Any]) -> None:
+def write_metrics_csv(path: Path, row: dict[str, Any]) -> None:
     # stable column order
     cols = [
         "seed",
@@ -193,6 +239,9 @@ def save_study_artifacts(study: optuna.Study, study_dir: Path) -> None:
 # CLI
 # -------------------------
 def parse_args() -> argparse.Namespace:
+    # NOTE: --model_type の選択肢をレジストリから引くため、ここで import する
+    import networks
+
     p = argparse.ArgumentParser(description="All-in-one ESN Optuna + CV + seed runner.")
 
     # Core experiment
@@ -200,17 +249,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--dataset",
         type=str,
-        default="cifar10",
+        default="cifar_10",
         choices=["mnist", "cifar_10", "stl_10"],
     )
-    p.add_argument(
-        "--model_type", type=str, default="esn", choices=["esn", "bi_esn", "bi_esn2d"]
-    )
+    p.add_argument("--data_root", type=str, default="~/torchvision_datasets", help="Dataset download directory.")
+    p.add_argument("--model_type", type=str, default="esn", choices=networks.list_classifiers())
     p.add_argument("--N_cv", type=int, default=5, help="Number of stratified folds.")
     p.add_argument("--N_seed", type=int, default=5, help="Number of reservoir seeds.")
-    p.add_argument(
-        "--n_trials", type=int, default=30, help="Optuna trials per (seed, fold)."
-    )
+    p.add_argument("--n_trials", type=int, default=30, help="Optuna trials per (seed, fold).")
 
     # Fixed/default hyperparameters (can be tuned if flags enabled)
     p.add_argument("--patch_h", type=int, default=4)
@@ -220,6 +266,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--leaky", type=float, default=0.9)
     p.add_argument("--spectral_radius", type=float, default=0.95)
     p.add_argument("--beta", type=float, default=1e-3)
+    p.add_argument("--n_layer", type=int, default=1, help="Number of stacked layers.")
+
+    # conv2d / reservoir_conv2d のみで使う
+    p.add_argument("--kernel_size", type=int, default=3)
+    p.add_argument("--num_reservoirs", type=int, default=5)
+    p.add_argument("--activation", type=str, default="tanh")
 
     # Training/eval mechanics
     p.add_argument("--batch_size", type=int, default=256)
@@ -243,9 +295,7 @@ def parse_args() -> argparse.Namespace:
 
     # Saving
     p.add_argument("--save_name", type=str, default="runs/exp_allinone")
-    p.add_argument(
-        "--overwrite", action="store_true", help="Overwrite existing fold/seed dirs."
-    )
+    p.add_argument("--overwrite", action="store_true", help="Overwrite existing fold/seed dirs.")
 
     # Optional optuna storage (sqlite etc.)
     p.add_argument(
@@ -279,15 +329,15 @@ def parse_args() -> argparse.Namespace:
         "--project_root",
         type=str,
         default=".",
-        help="Project root to add to sys.path so 'import models' works.",
+        help="Project root to add to sys.path so 'import networks' works.",
     )
 
     return p.parse_args()
 
 
-def suggest_params(trial: optuna.Trial, args: argparse.Namespace) -> Dict[str, Any]:
+def suggest_params(trial: optuna.Trial, args: argparse.Namespace) -> dict[str, Any]:
     """Return a dict of hyperparameters for this trial (merging fixed + tuned)."""
-    hp: Dict[str, Any] = {}
+    hp: dict[str, Any] = {}
 
     # model type
     hp["model_type"] = (
@@ -307,11 +357,7 @@ def suggest_params(trial: optuna.Trial, args: argparse.Namespace) -> Dict[str, A
         hp["patch_h"], hp["patch_w"] = int(args.patch_h), int(args.patch_w)
 
     # units
-    hp["units"] = (
-        int(trial.suggest_int("units", 128, 2048, log=True))
-        if args.tune_units
-        else int(args.units)
-    )
+    hp["units"] = int(trial.suggest_int("units", 128, 2048, log=True)) if args.tune_units else int(args.units)
 
     # connectivity
     hp["connectivity"] = (
@@ -321,11 +367,7 @@ def suggest_params(trial: optuna.Trial, args: argparse.Namespace) -> Dict[str, A
     )
 
     # leaky
-    hp["leaky"] = (
-        float(trial.suggest_float("leaky", 0.5, 1.0))
-        if args.tune_leaky
-        else float(args.leaky)
-    )
+    hp["leaky"] = float(trial.suggest_float("leaky", 0.5, 1.0)) if args.tune_leaky else float(args.leaky)
 
     # spectral radius
     hp["spectral_radius"] = (
@@ -335,11 +377,13 @@ def suggest_params(trial: optuna.Trial, args: argparse.Namespace) -> Dict[str, A
     )
 
     # ridge beta
-    hp["beta"] = (
-        float(trial.suggest_float("beta", 1e-5, 1e-3, log=True))
-        if args.tune_beta
-        else float(args.beta)
-    )
+    hp["beta"] = float(trial.suggest_float("beta", 1e-5, 1e-3, log=True)) if args.tune_beta else float(args.beta)
+
+    # 探索対象にしていない、モデル固有のパラメータ
+    hp["n_layer"] = int(args.n_layer)
+    hp["kernel_size"] = int(args.kernel_size)
+    hp["num_reservoirs"] = int(args.num_reservoirs)
+    hp["activation"] = args.activation
 
     return hp
 
@@ -347,20 +391,23 @@ def suggest_params(trial: optuna.Trial, args: argparse.Namespace) -> Dict[str, A
 def main() -> None:
     args = parse_args()
 
+    # NOTE: torch は最初に CUDA へ触れた時点で可視デバイスが決まるので、モデル構築より前に設定する
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
 
     # Environment / imports
     sys.path.append(os.path.abspath(args.project_root))
     sys.path.append(os.getcwd())
-    import models  # noqa: F401
+    import networks
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Data
-    x_train, y_train_int, x_test, y_test_int, num_classes = load_dataset(args.dataset)
+    x_train, y_train_int, x_test, y_test_int, num_classes = load_dataset(args.dataset, args.data_root)
     if args.limit_train and args.limit_train > 0:
         x_train = x_train[: args.limit_train]
         y_train_int = y_train_int[: args.limit_train]
 
-    H, W, C = x_train.shape[1:]
+    C, H, W = x_train.shape[1:]
 
     save_root = Path(args.save_name)
     save_root.mkdir(parents=True, exist_ok=True)
@@ -373,6 +420,7 @@ def main() -> None:
         f"[INFO] model_type(default)={args.model_type} N_seed={args.N_seed} N_cv={args.N_cv} trials={args.n_trials}",
         flush=True,
     )
+    print(f"[INFO] device={device} input_shape={(C, H, W)}", flush=True)
     print(f"[INFO] save_root={save_root.resolve()}", flush=True)
 
     # Optuna common objects
@@ -390,16 +438,15 @@ def main() -> None:
         reservoir_seed = int(args.base_seed + s)
         set_global_determinism(reservoir_seed)
 
-        skf = StratifiedKFold(
-            n_splits=args.N_cv, shuffle=True, random_state=reservoir_seed
-        )
+        skf = StratifiedKFold(n_splits=args.N_cv, shuffle=True, random_state=reservoir_seed)
 
         print(
             f"\n[SEED] s={s}/{args.N_seed-1} reservoir_seed={reservoir_seed}",
             flush=True,
         )
 
-        for cv_id, (tr_idx, va_idx) in enumerate(skf.split(x_train, y_train_int)):
+        # NOTE: 分割はラベルだけで決まるので、画像本体はダミーを渡して不要なコピーを避ける
+        for cv_id, (tr_idx, va_idx) in enumerate(skf.split(np.zeros(len(y_train_int)), y_train_int)):
             fold_dir = save_root / f"cv-{cv_id}_seed-{reservoir_seed}"
             if fold_dir.exists() and args.overwrite:
                 # remove minimal files only (keep safety)
@@ -417,7 +464,7 @@ def main() -> None:
             x_tr, y_tr = x_train[tr_idx], y_train_int[tr_idx]
             x_va, y_va = x_train[va_idx], y_train_int[va_idx]
 
-            y_tr_oh = keras.utils.to_categorical(y_tr, num_classes).astype("float32")
+            y_tr_oh = F.one_hot(torch.from_numpy(y_tr), num_classes).float()
 
             print(
                 f"\n=== START seed={reservoir_seed} cv={cv_id}/{args.N_cv-1} | train={len(x_tr)} val={len(x_va)} ===",
@@ -425,27 +472,23 @@ def main() -> None:
             )
 
             # Build function
-            def build_classifier(hp: Dict[str, Any]) -> keras.Model:
+            def build_classifier(hp: dict[str, Any]) -> torch.nn.Module:
                 set_global_determinism(reservoir_seed)
 
-                return models.model.get_classifier(
-                    input_shape=(H, W, C),
+                model = networks.build_classifier(
+                    hp["model_type"],
+                    input_shape=(C, H, W),
                     num_classes=num_classes,
-                    patch_sizes=(hp["patch_h"], hp["patch_w"]),
-                    model_type=hp["model_type"],
-                    units=hp["units"],
-                    connectivity=hp["connectivity"],
-                    leaky=hp["leaky"],
-                    spectral_radius=hp["spectral_radius"],
+                    n_layer=hp["n_layer"],
                     seed=reservoir_seed,
+                    **classifier_kwargs(hp["model_type"], hp),
                 )
+
+                return model.to(device).eval()
 
             # Study name per (seed, cv)
             study_name = f"{args.dataset}_seed{reservoir_seed}_cv{cv_id}"
             storage = args.study_storage.strip() or None
-            if storage is not None and "study_name" in storage:
-                # ignore; users should set storage URL only
-                pass
 
             study = optuna.create_study(
                 study_name=study_name,
@@ -462,7 +505,7 @@ def main() -> None:
 
                 model = build_classifier(hp)
                 model, _ = fit_ridge_readout(
-                    model, x_tr, y_tr_oh, beta=hp["beta"], batch_size=args.batch_size
+                    model, x_tr, y_tr_oh, beta=hp["beta"], batch_size=args.batch_size, device=device
                 )
 
                 val_metrics = evaluate_model(
@@ -471,6 +514,7 @@ def main() -> None:
                     y_va,
                     num_classes=num_classes,
                     batch_size=args.batch_size,
+                    device=device,
                 )
                 score = float(val_metrics[args.optuna_metric])
 
@@ -485,8 +529,9 @@ def main() -> None:
                     ),
                     flush=True,
                 )
-                # clear session to reduce memory growth
-                keras.backend.clear_session()
+                # 次の trial の前にリザバーの重みを解放する
+                del model
+                torch.cuda.empty_cache()
 
                 # report for pruner
                 trial.report(score, step=trial.number)
@@ -496,9 +541,7 @@ def main() -> None:
             study.optimize(objective, n_trials=args.n_trials)
 
             best_trial = study.best_trial
-            best_hp = suggest_params(
-                best_trial, args
-            )  # will use best params where tuned
+            best_hp = suggest_params(best_trial, args)  # will use best params where tuned
             # Override with actual best params (they are a subset)
             for k, v in best_trial.params.items():
                 if k == "patch":
@@ -519,6 +562,7 @@ def main() -> None:
                 y_tr_oh,
                 beta=float(best_hp["beta"]),
                 batch_size=args.batch_size,
+                device=device,
             )
 
             test_metrics = evaluate_model(
@@ -527,6 +571,7 @@ def main() -> None:
                 y_test_int,
                 num_classes=num_classes,
                 batch_size=args.batch_size,
+                device=device,
             )
 
             end_t = dt.datetime.now()
@@ -602,8 +647,8 @@ def main() -> None:
             print(f"[seed={reservoir_seed} cv={cv_id}] Saved to {fold_dir}", flush=True)
             print(f"=== END seed={reservoir_seed} cv={cv_id} ===", flush=True)
 
-            # clear session after fold
-            keras.backend.clear_session()
+            del best_model
+            torch.cuda.empty_cache()
 
     print("\n[ALL DONE]", flush=True)
 

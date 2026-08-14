@@ -2,7 +2,6 @@ import os
 import sys
 import warnings
 
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 sys.path.append(os.getcwd())
 sys.path.append("..")
 warnings.filterwarnings("ignore")
@@ -10,16 +9,21 @@ warnings.filterwarnings("ignore")
 import pprint
 
 import matplotlib.pyplot as plt
-import numpy as np
-from tensorflow import keras
+import torch
+import torch.nn.functional as F
 
-import models
+import networks
 import src
+
+
+# (B, H, W, C) の numpy 画像を PyTorch の (B, C, H, W) tensor にする
+def to_tensor(imgs):
+    return torch.from_numpy(imgs).permute(0, 3, 1, 2).contiguous()
 
 
 def main(args):
     # Reset seed
-    src.utils.reset_seed(0)
+    src.utils.reset_seed(args.seed)
 
     TRAIN_PATH = args.train_data_path
     TEST_PATH = args.test_data_path
@@ -28,41 +32,47 @@ def main(args):
     H, W = args.resizes
     C = 3 if args.img_mode == "rgb" else 1
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[INFO] device: {device}")
+
     # Train (normal images)
     train_files = src.data.path_to_files(TRAIN_PATH)
-    train_imgs = src.data.files_to_imgs(train_files, img_mode=args.img_mode, resizes=(H, W))
+    train_imgs = to_tensor(src.data.files_to_imgs(train_files, img_mode=args.img_mode, resizes=(H, W)))
 
     # Test
     test_files = src.data.path_to_files(TEST_PATH)
-    test_imgs = src.data.files_to_imgs(test_files, img_mode="rgb", resizes=(H, W))
+    test_imgs = to_tensor(src.data.files_to_imgs(test_files, img_mode=args.img_mode, resizes=(H, W)))
 
     # Model
-    feature_extractor = models.model.get_feature_extractor(
-        input_shape=(H, W, C),
-        output_shape=(64, 64, 32 * 3),
-        model_type=args.model,
+    feature_extractor = networks.build_extractor(
+        args.model,
+        input_shape=(C, H, W),
+        output_shape=tuple(args.output_shape),
+        seed=args.seed,
     )
 
-    # PaDiM
+    # PaDiM のランダム次元削減は、削減後の次元が元の次元より小さいときだけ意味がある
+    random_dim_size = args.random_dim_size if args.random_dim_size > 0 else None
+    if random_dim_size is not None and random_dim_size >= feature_extractor.output_dim:
+        print(
+            f"[INFO] random_dim_size ({random_dim_size}) >= extractor output_dim "
+            f"({feature_extractor.output_dim}); skip the random dimensionality reduction."
+        )
+        random_dim_size = None
+
+    padim = networks.PaDiM(feature_extractor, random_dim_size=random_dim_size, seed=args.seed).to(device)
+    print(f"[INFO] embedding dim: {padim.embedding_dim} (extractor output_dim: {feature_extractor.output_dim})")
+
     # Calculate the statistics of the normal distribution
-    normal_statistics = models.padim_framework.cal_statistics(
-        normal_imgs=train_imgs,
-        feature_extractor=feature_extractor,
-        prioritize_memory=False,
-    )
+    padim.fit(train_imgs, batch_size=args.batch_size)
 
     # Calculate the anomaly scores
-    anomaps = models.padim_framework.cal_mahalanobis_distance(
-        input_imgs=test_imgs,
-        normal_statistics=normal_statistics,
-        feature_extractor=feature_extractor,
-        prioritize_memory=False,
-    )
+    dist_maps = padim.score(test_imgs, batch_size=args.batch_size)
 
     # Create the anomaly maps
-    anomaps = keras.layers.Resizing(H, W, interpolation="bilinear")(anomaps)
-    anomaps = anomaps.numpy().reshape(-1, H, W)
-    anomaps = (anomaps - np.min(anomaps)) / (np.max(anomaps) - np.min(anomaps))
+    anomaps = F.interpolate(dist_maps.unsqueeze(1), size=(H, W), mode="bilinear", align_corners=False)
+    anomaps = anomaps.squeeze(1).cpu().numpy()
+    anomaps = (anomaps - anomaps.min()) / (anomaps.max() - anomaps.min())
 
     # Save the anomaly maps
     for i, anomap in enumerate(anomaps):

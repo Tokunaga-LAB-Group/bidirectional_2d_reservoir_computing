@@ -1,6 +1,6 @@
 import glob
 import os
-from typing import List, Literal, Tuple
+from typing import Literal
 
 import numpy as np
 from natsort import natsorted
@@ -8,15 +8,15 @@ from numpy.typing import NDArray
 from PIL import Image
 
 
-def path_to_files(img_path: str) -> List[str]:
+def path_to_files(img_path: str) -> list[str]:
     img_files = natsorted(glob.glob(os.path.join(img_path, "**", "*.*"), recursive=True))
     return img_files
 
 
 def files_to_imgs(
-    img_files: List[str],
+    img_files: list[str],
     img_mode: Literal["rgb", "gray"] = "rgb",
-    resizes: Tuple[int, int] = (256, 256),
+    resizes: tuple[int, int] = (256, 256),
 ) -> NDArray[np.float32]:
 
     H, W = resizes

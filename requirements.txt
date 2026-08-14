@@ -1,0 +1,18 @@
+# PyTorch 版パイプライン (networks/, src/, notebooks/check_*.ipynb) の依存関係。
+# Python 3.13 / CUDA 13.2 の環境で動作確認したバージョンを固定している。
+#
+#   pip install -r requirements.txt
+--extra-index-url https://download.pytorch.org/whl/cu132
+
+torch==2.13.0+cu132
+torchvision==0.28.0+cu132       
+
+numpy==2.4.4
+pillow==12.2.0                  
+natsort==8.4.0                  
+tqdm==4.70.0                    
+matplotlib==3.11.1   
+japanize_matplotlib           
+optuna==4.9.0                  
+scikit-learn==1.9.0              
+pandas==3.0.5             

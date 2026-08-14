@@ -4,7 +4,6 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import random
-from typing import List, Literal, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,15 +19,14 @@ plt.rcParams["ytick.direction"] = "in"
 plt.rcParams["axes.linewidth"] = 1.0
 plt.rcParams["axes.grid"] = True
 
-import tensorflow as tf
+import torch
 
 
 def reset_seed(seed: int = 0) -> None:
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    os.environ["TF_DETERMINISTIC_OPS"] = "1"
-    tf.random.set_seed(seed)
-    np.random.seed(seed)
     random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def get_created_dir(*args: str) -> str:
@@ -40,9 +38,9 @@ def get_created_dir(*args: str) -> str:
 # 比較画像の表示
 def save_compare_figure(
     f_save: str,
-    title_list: List[str],
-    img_list: List[NDArray[np.float32]],
-    cmap_list: List[str],
+    title_list: list[str],
+    img_list: list[NDArray[np.float32]],
+    cmap_list: list[str],
     suptitle: str = None,
 ) -> None:
     if suptitle is None:
