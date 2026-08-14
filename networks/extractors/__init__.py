@@ -1,7 +1,7 @@
 import os
 
 # Custom
-from networks._registry import collect_builders, get_builder
+from networks.registry import collect_builders, get_builder
 
 # __name__: networks.extractors
 # __file__: networks/extractors/__init__.py

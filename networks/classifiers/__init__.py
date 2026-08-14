@@ -1,7 +1,7 @@
 import os
 
 # Custom
-from networks._registry import collect_builders, get_builder
+from networks.registry import collect_builders, get_builder
 
 _builders = collect_builders(__name__, os.path.dirname(__file__))
 
