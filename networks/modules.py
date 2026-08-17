@@ -311,6 +311,149 @@ class ReservoirConv2D(nn.Module):
         return torch.cat(feats, dim=-1).reshape(B, H_out, W_out, output_dim)
 
 
+def glorot_uniform(shape: tuple[int, int], generator: torch.Generator) -> torch.Tensor:
+    """分散が 2/(fan_in + fan_out) になる一様分布から重みを引く。
+
+    NOTE: nn.Linear の既定の初期化はグローバル RNG に依存するため、seed 引数だけでは再現しない。
+          Reservoir と同じく Generator から明示的に引き直すためのヘルパ。
+    """
+    limit = (6.0 / (shape[0] + shape[1])) ** 0.5
+    return (torch.rand(shape, generator=generator) * 2 - 1) * limit
+
+
+def lecun_uniform(shape: tuple[int, int], generator: torch.Generator) -> torch.Tensor:
+    """分散が 1/fan_in になる一様分布から重みを引く (出力の分散が入力の分散と揃う)。"""
+    limit = (3.0 / shape[0]) ** 0.5
+    return (torch.rand(shape, generator=generator) * 2 - 1) * limit
+
+
+def sincos_positions_2d(N_h: int, N_w: int, dim: int) -> torch.Tensor:
+    """2 次元の正弦波位置符号 (1, N_h, N_w, dim) を返す。
+
+    前半 dim/2 チャネルが行位置、後半 dim/2 チャネルが列位置を符号化する。
+    各軸の内訳は Transformer と同じで、周波数ごとに sin と cos の対を持つため dim は 4 の倍数。
+    """
+    if dim % 4 != 0:
+        raise ValueError(f"dim must be divisible by 4, got {dim}.")
+
+    d_axis = dim // 2
+    omega = 1.0 / (10000.0 ** (torch.arange(0, d_axis, 2, dtype=torch.float32) / d_axis))
+
+    def encode(n: int) -> torch.Tensor:
+        phase = torch.arange(n, dtype=torch.float32).unsqueeze(1) * omega  # (n, d_axis/2)
+        return torch.cat([phase.sin(), phase.cos()], dim=-1)  # (n, d_axis)
+
+    enc_h = encode(N_h).reshape(N_h, 1, d_axis).expand(N_h, N_w, d_axis)
+    enc_w = encode(N_w).reshape(1, N_w, d_axis).expand(N_h, N_w, d_axis)
+
+    return torch.cat([enc_h, enc_w], dim=-1).unsqueeze(0).contiguous()  # (1, N_h, N_w, dim)
+
+
+# (B, N_h, N_w, D) -> (B, N_h, N_w, D + dim)
+class ConcatSinCosPositions2D(nn.Module):
+    """2 次元正弦波位置符号を入力の末尾に連結する。
+
+    NOTE: ViT のように埋め込みへ「加算」するのではなく「連結」する。ここでの入力はパッチの生値で
+          スケールが位置符号 ([-1, 1]) と揃っておらず、加算すると位置符号が入力を上書きしてしまうため。
+    """
+
+    def __init__(self, N_h: int, N_w: int, dim: int):
+        super().__init__()
+        self.dim = dim
+        self.register_buffer("encoding", sincos_positions_2d(N_h, N_w, dim))
+
+    def forward(self, inputs):
+        return torch.cat([inputs, self.encoding.expand(inputs.shape[0], -1, -1, -1)], dim=-1)
+
+
+def criss_cross_mask(N_h: int, N_w: int) -> torch.Tensor:
+    """criss-cross attention 用の attn_mask (N_h*N_w, N_h*N_w) を返す。True が「見ない」。
+
+    位置 (i, j) から見えるのは行 i と列 j の N_h + N_w - 1 箇所だけになる
+    (自分自身は行と列の両方に属するが、集合なので 1 回しか数えられない)。
+    """
+    rows = torch.arange(N_h * N_w) // N_w
+    cols = torch.arange(N_h * N_w) % N_w
+
+    same_row = rows.unsqueeze(1) == rows.unsqueeze(0)
+    same_col = cols.unsqueeze(1) == cols.unsqueeze(0)
+
+    return ~(same_row | same_col)
+
+
+# 固定ランダム重みの nn.MultiheadAttention を channel-last の 2 次元格子へ適用する
+# (B, N_h, N_w, input_dim) -> (B, N_h, N_w, units)
+#
+# NOTE: attention の計算そのものは torch の nn.MultiheadAttention をそのまま使い、
+#       重みだけを Generator から引いた固定値で上書きする。本リポジトリの他の classifier と同じく
+#       「特徴抽出側は非訓練、読み出しだけリッジ回帰」という条件に合わせるための最小限の変更である
+#
+# NOTE: attn_mask を与えると、許可された位置だけを見る attention になる。criss-cross attention
+#       (CCNet, Huang et al. ICCV 2019) は「同じ行・同じ列以外を塞いだ self-attention」と厳密に等価なので、
+#       self_attention と criss_cross_attention はマスク以外すべて同一の実装・同一の重みになる。
+#       両者の差はそのまま「受容野を十字に絞ったことの寄与」として読める
+class FixedMultiheadAttention2D(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        units: int,
+        n_head: int = 4,
+        temperature: float = 1.0,
+        seed: int = 0,
+        attn_mask: torch.Tensor | None = None,
+    ):
+        super().__init__()
+        if units % n_head != 0:
+            raise ValueError(f"units must be divisible by n_head, got units={units}, n_head={n_head}.")
+        if temperature <= 0:
+            raise ValueError(f"temperature must be > 0, got {temperature}.")
+
+        self.units = units
+
+        g = torch.Generator().manual_seed(seed)
+
+        # NOTE: nn.MultiheadAttention は出力次元が query の次元 (embed_dim) に固定されるため、
+        #       units をパッチ次元と独立に選ぶには一度 units へ射影しておく必要がある
+        #       (ViT の patch embedding に相当する)。分散を保つよう LeCun 一様で引く
+        self.register_buffer("W_embed", lecun_uniform((input_dim, units), g))
+
+        self.attention = nn.MultiheadAttention(units, n_head, bias=False, batch_first=True)
+
+        # NOTE: temperature は Q 側の重みを 1/temperature 倍するだけで実現できる。
+        #       nn.MultiheadAttention の 1/sqrt(d_head) は固定だが、
+        #       softmax(qk^T/sqrt(d)) の q を定数倍することと温度を割ることは同じ操作のため、
+        #       attention の実装には一切手を入れずに済む。
+        #       大きくするほど注意が一様に近づき、attention は単なる空間平均へ退化する
+        W_q = lecun_uniform((units, units), g) / float(temperature)
+        W_k = lecun_uniform((units, units), g)
+
+        # V/O は出力そのもののスケールを決めるので、他の classifier と揃えて Glorot にする
+        W_v = glorot_uniform((units, units), g)
+        W_o = glorot_uniform((units, units), g)
+
+        # NOTE: nn.MultiheadAttention は x @ W.T の形で射影するため、転置して詰める
+        with torch.no_grad():
+            self.attention.in_proj_weight.copy_(torch.cat([W_q.T, W_k.T, W_v.T], dim=0))
+            self.attention.out_proj.weight.copy_(W_o.T)
+
+        # 固定重み (非訓練) として扱う
+        self.attention.requires_grad_(False)
+
+        if attn_mask is None:
+            self.attn_mask = None
+        else:
+            self.register_buffer("attn_mask", attn_mask)
+
+    def forward(self, inputs):
+        B, N_h, N_w, _ = inputs.shape
+
+        with torch.no_grad():
+            x = (inputs @ self.W_embed).reshape(B, N_h * N_w, self.units)  # (B, T, units)
+
+            out, _ = self.attention(x, x, x, need_weights=False, attn_mask=self.attn_mask)
+
+            return out.reshape(B, N_h, N_w, self.units)
+
 # 層を積むモデルのハイパーパラメータを層ごとに展開する
 def per_layer_hparams(n_layer: int | None = None, **hparams) -> list[dict]:
     """ハイパーパラメータを層ごとの辞書のリストに展開する。
@@ -391,7 +534,8 @@ def get_activation(name: str) -> nn.Module:
     """活性化関数の名前から PyTorch のモジュールを返す。
 
     Args:
-        name: 活性化関数の名前。'relu', 'tanh', 'sigmoid', 'gelu', 'swish' のいずれか。
+        name: 活性化関数の名前。'relu', 'tanh', 'sigmoid', 'gelu', 'swish', 'identity' のいずれか。
+            'identity' は活性化を挟まない (非線形性の寄与を切り分ける対照実験用)。
     """
     name = name.lower()
 
@@ -406,6 +550,8 @@ def get_activation(name: str) -> nn.Module:
             return nn.GELU()
         case "swish":
             return nn.SiLU()
+        case "identity":
+            return nn.Identity()
         case _:
             raise ValueError(f"Unsupported activation function: {name}.")
 

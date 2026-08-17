@@ -118,6 +118,24 @@ def classifier_kwargs(model_type: str, hp: dict[str, Any]) -> dict[str, Any]:
             "connectivity": hp["connectivity"],
             "spectral_radius": hp["spectral_radius"],
         }
+    if model_type in ("self_attention", "criss_cross_attention"):
+        return {
+            "patch_sizes": (hp["patch_h"], hp["patch_w"]),
+            "units": hp["units"],
+            "n_head": hp["n_head"],
+            "temperature": hp["temperature"],
+            "activations": hp["activation"],
+            "pos_encoding": hp["pos_encoding"],
+        }
+    if model_type == "positionwise_fcl":
+        return {
+            "patch_sizes": (hp["patch_h"], hp["patch_w"]),
+            "units": hp["units"],
+            "activations": hp["activation"],
+        }
+    if model_type == "fcl":
+        # fcl は画像全体を 1 本に潰すのでパッチ化しない
+        return {"units": hp["units"], "activations": hp["activation"]}
 
     raise ValueError(f"Unknown model_type: {model_type}.")
 
@@ -273,6 +291,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num_reservoirs", type=int, default=5)
     p.add_argument("--activation", type=str, default="tanh")
 
+    # self_attention / criss_cross_attention のみで使う
+    p.add_argument("--n_head", type=int, default=4, help="Number of attention heads (units must be divisible by it).")
+    p.add_argument(
+        "--temperature",
+        type=float,
+        default=0.3,
+        help="Softmax temperature of the scaled dot-product. 大きいほど注意が一様 (= 空間平均) に近づく。",
+    )
+    p.add_argument(
+        "--pos_encoding",
+        type=str,
+        default="sincos",
+        choices=["sincos", "none"],
+        help="Positional encoding concatenated to the patches. 'none' は置換不変な対照条件。",
+    )
+
     # Training/eval mechanics
     p.add_argument("--batch_size", type=int, default=256)
 
@@ -315,6 +349,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tune_leaky", action="store_true")
     p.add_argument("--tune_spectral_radius", action="store_true")
     p.add_argument("--tune_beta", action="store_true")
+    p.add_argument("--tune_temperature", action="store_true")
 
     # Base seed for determinism of non-reservoir randomness (data shuffling etc.)
     p.add_argument(
@@ -379,11 +414,22 @@ def suggest_params(trial: optuna.Trial, args: argparse.Namespace) -> dict[str, A
     # ridge beta
     hp["beta"] = float(trial.suggest_float("beta", 1e-5, 1e-3, log=True)) if args.tune_beta else float(args.beta)
 
+    # attention の温度
+    # NOTE: リザバー系の spectral_radius / leaky と同じく「どこまで混ぜるか」を決める量なので、
+    #       探索対象としての位置づけも同じ
+    hp["temperature"] = (
+        float(trial.suggest_float("temperature", 0.05, 5.0, log=True))
+        if args.tune_temperature
+        else float(args.temperature)
+    )
+
     # 探索対象にしていない、モデル固有のパラメータ
     hp["n_layer"] = int(args.n_layer)
     hp["kernel_size"] = int(args.kernel_size)
     hp["num_reservoirs"] = int(args.num_reservoirs)
     hp["activation"] = args.activation
+    hp["n_head"] = int(args.n_head)
+    hp["pos_encoding"] = args.pos_encoding
 
     return hp
 
