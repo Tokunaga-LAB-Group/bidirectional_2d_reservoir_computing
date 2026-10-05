@@ -19,6 +19,7 @@ class ESNClassifier(modules.Classifier):
         connectivity: float | list[float] = 0.1,
         leaky: float | list[float] = 0.9,
         spectral_radius: float | list[float] = 0.95,
+        input_scaling: float | list[float] = 1.0,
         n_layer: int | None = None,
         seed: int | list[int] = 0,
     ):
@@ -28,6 +29,7 @@ class ESNClassifier(modules.Classifier):
             connectivity=connectivity,
             leaky=leaky,
             spectral_radius=spectral_radius,
+            input_scaling=input_scaling,
         )
 
         # 特徴量の次元は最終層の units になる
@@ -48,7 +50,7 @@ class ESNClassifier(modules.Classifier):
         for hp, layer_seed in zip(layer_params, seeds):
             reservoirs.append(
                 modules.Reservoir(
-                    input_dim, hp["units"], hp["connectivity"], hp["leaky"], hp["spectral_radius"], layer_seed
+                    input_dim, hp["units"], hp["connectivity"], hp["leaky"], hp["spectral_radius"], hp["input_scaling"], layer_seed
                 )
             )
             input_dim = hp["units"]

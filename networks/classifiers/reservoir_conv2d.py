@@ -7,6 +7,16 @@ from networks import modules
 
 # K x K の窓を縦横のリザバーで走査して特徴マップを作り、空間平均を線形読み出しに渡す
 #
+# NOTE: padding は原典 (Tanaka & Tamukoh, NOLTA 2022) と同じ "valid" にしてある。
+#       原典が報告する学習パラメータ数 (MNIST 75,010 / CIFAR-10 108,010) は、
+#       K=3 stride=1 の valid 畳み込み 2 層 + 2x2 プーリング 2 回で最終特徴マップが
+#       300x5x5 / 300x6x6 になる構成と一致する。kernel_size を 3 に固定するため、
+#       "same" にして解像度を揃える必要も無い
+#
+# NOTE: pool_size は各層の直後に挟む max pooling の窓 (1 で無効)。層を積んだときに
+#       受容野を広げつつ空間次元を落とす役割で、Tanaka & Tamukoh (NOLTA 2022) の原典が
+#       conv -> pool -> conv -> pool の構成を取っているのに合わせて用意してある
+#
 # NOTE: units などのハイパーパラメータはリストで層ごとに指定できる (modules.per_layer_hparams 参照)。
 #       スカラーで渡した場合は全層で同じ値になる
 class ReservoirConv2DClassifier(modules.Classifier):
@@ -18,9 +28,11 @@ class ReservoirConv2DClassifier(modules.Classifier):
         units: int | list[int] = 12,
         kernel_size: int | list[int] = 3,
         stride: int | list[int] = 1,
-        padding: int | tuple[int, int] | str | list = 0,
+        padding: int | tuple[int, int] | str | list = "valid",
+        pool_size: int | list[int] = 1,
         connectivity: float | list[float] = 0.5,
         spectral_radius: float | list[float] = 0.95,
+        input_scaling: float | list[float] = 1.0,
         n_layer: int | None = None,
         seed: int | list[int] = 0,
     ):
@@ -31,8 +43,10 @@ class ReservoirConv2DClassifier(modules.Classifier):
             kernel_size=kernel_size,
             stride=stride,
             padding=padding,
+            pool_size=pool_size,
             connectivity=connectivity,
             spectral_radius=spectral_radius,
+            input_scaling=input_scaling,
         )
 
         # 特徴量の次元は最終層の 2 * num_reservoirs * units になる。式を二重に持たないよう、
@@ -55,9 +69,13 @@ class ReservoirConv2DClassifier(modules.Classifier):
                 hp["padding"],
                 hp["connectivity"],
                 hp["spectral_radius"],
+                hp["input_scaling"],
                 layer_seed,
             )
             reservoir_conv2ds.append(layer)
+            if int(hp["pool_size"]) > 1:
+                # ReservoirConv2D は channel-last なので modules.MaxPool2D を使う
+                reservoir_conv2ds.append(modules.MaxPool2D((int(hp["pool_size"]), int(hp["pool_size"]))))
             in_channels = layer.output_dim
 
         super().__init__(feature_dim=in_channels, num_classes=num_classes)

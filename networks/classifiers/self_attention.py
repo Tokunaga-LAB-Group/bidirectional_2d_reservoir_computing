@@ -9,15 +9,17 @@ from networks import modules
 # NOTE: 1 層目から全パッチが相互作用するので、受容野は最初から画像全体になる。
 #       esn / bi_esn が系列走査で 1 層目から画像全体を見るのと同じ立ち位置だが、
 #       あちらは走査順に沿った減衰を持つのに対し、こちらは距離に関係なく全対全で見る。
-#       criss_cross_attention は同じ attention のまま受容野を十字に制限した版で、
-#       両者の差が「十字に絞ることの寄与」になる
+#       criss_cross_attention は受容野を十字に絞った条件だが、そちらは CCNet 原典の構成
+#       (Q/K のボトルネック、スケーリング無し、出力射影無し) を写しているため、
+#       両者の差は受容野だけではない
 #
 # NOTE: 重みは学習せず seed だけで決まる (読み出しだけをリッジ回帰で解く条件を他の classifier と揃えるため)。
 #       したがって Q/K は「学習された類似度」ではなくランダム射影上の類似度である
 #
-# NOTE: temperature の既定値 0.3 は MNIST 10,000 枚・units=512・1 層で掃引して決めた
-#       (val acc: T=0.02 -> 0.816, 0.1 -> 0.838, 0.3 -> 0.843, 1.0 -> 0.789, 100 -> 0.703)。
-#       criss_cross_attention と共通の既定値にしてある (あちらは 0.3-1.0 が平坦で最良)
+# NOTE: nn.MultiheadAttention を固定重みにしただけの構成にしてある。softmax の温度は
+#       1/sqrt(d_head) が実装に内蔵されていて次元から自動的に決まるので、独立の
+#       ハイパーパラメータとしては持たない。既定のヘッド数も原典の criss-cross attention に
+#       合わせて 1 とする
 #
 # NOTE: units などのハイパーパラメータはリストで層ごとに指定できる (modules.per_layer_hparams 参照)。
 #       スカラーで渡した場合は全層で同じ値になる
@@ -28,11 +30,11 @@ class SelfAttentionClassifier(modules.Classifier):
         num_classes: int,
         patch_sizes: tuple[int, int] = (4, 4),
         units: int | list[int] = 256,
-        n_head: int | list[int] = 4,
-        temperature: float | list[float] = 0.3,
+        n_head: int | list[int] = 1,
+        input_scaling: float | list[float] = 1.0,
         activations: str | list[str] = "tanh",
         pos_encoding: str = "sincos",
-        pos_dim: int = 16,
+        pos_scale: float = 1.0,
         n_layer: int | None = None,
         seed: int | list[int] = 0,
     ):
@@ -40,7 +42,7 @@ class SelfAttentionClassifier(modules.Classifier):
             n_layer,
             units=units,
             n_head=n_head,
-            temperature=temperature,
+            input_scaling=input_scaling,
             activations=activations,
         )
 
@@ -69,18 +71,16 @@ class SelfAttentionClassifier(modules.Classifier):
         #       MNIST のクラス情報がパッチの中身ではなく配置にあるためで、パッチ配置をシャッフルすると
         #       bi_esn2d は -45.6 pt 落ちるのに対し "none" の attention は 0.0 pt しか動かない
         #       (= 最初から配置を使っていない)。"none" は置換不変な対照条件として使う
-        self.pos_encoding = self._build_pos_encoding(pos_encoding, H // Hp, W // Wp, pos_dim)
-        if pos_encoding == "sincos":
-            input_dim += pos_dim
 
         # 1 層あたりの重み (埋め込みと Q/K/V/O) を 1 つの Generator から引くので、seed は 1 つずつ消費する
         seeds = modules.per_layer_seeds(seed, [1] * len(layers))
 
         attentions = []
         for hp, layer_seed in zip(layers, seeds):
+            pos = self._build_pos(pos_encoding, H // Hp, W // Wp, hp["units"], pos_scale)
             # attn_mask を渡さない = 全パッチが相互に見える通常の self-attention
             attention = modules.FixedMultiheadAttention2D(
-                input_dim, hp["units"], hp["n_head"], hp["temperature"], layer_seed
+                input_dim, hp["units"], hp["n_head"], hp["input_scaling"], layer_seed, None, pos
             )
 
             # NOTE: attention は softmax の分だけ入力に対して非線形だが、V と O の経路は線形のままなので、
@@ -95,18 +95,18 @@ class SelfAttentionClassifier(modules.Classifier):
         self.attentions.requires_grad_(False)
 
     @staticmethod
-    def _build_pos_encoding(pos_encoding: str, N_h: int, N_w: int, pos_dim: int) -> nn.Module:
+    def _build_pos(pos_encoding: str, N_h: int, N_w: int, units: int, pos_scale: float) -> nn.Module:
+        """埋め込み後に加算する位置符号を作る。'none' は置換不変な対照条件。"""
         if pos_encoding == "none":
             return nn.Identity()
         if pos_encoding == "sincos":
-            return modules.ConcatSinCosPositions2D(N_h, N_w, pos_dim)
+            return modules.AddSinCosPositions2D(N_h, N_w, units, pos_scale)
 
         raise ValueError(f"pos_encoding must be 'sincos' or 'none', got {pos_encoding!r}.")
 
     # (B, C, H, W) -> (B, feature_dim)
     def features(self, images):
         x = self.patchify(images)  # (B, N_h, N_w, D)
-        x = self.pos_encoding(x)  # (B, N_h, N_w, D + pos_dim)
         x = self.attentions(x)  # (B, N_h, N_w, units)
 
         return x.mean(dim=(1, 2))  # (B, units)

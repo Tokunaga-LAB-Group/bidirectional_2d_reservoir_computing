@@ -19,6 +19,8 @@ class BiESN2DClassifier(modules.Classifier):
         connectivity: float | list[float] = 0.1,
         leaky: float | list[float] = 0.9,
         spectral_radius: float | list[float] = 0.95,
+        input_scaling: float | list[float] = 1.0,
+        pool_size: int | list[int] = 1,
         n_layer: int | None = None,
         seed: int | list[int] = 0,
     ):
@@ -28,6 +30,8 @@ class BiESN2DClassifier(modules.Classifier):
             connectivity=connectivity,
             leaky=leaky,
             spectral_radius=spectral_radius,
+            input_scaling=input_scaling,
+            pool_size=pool_size,
         )
 
         # 特徴量の次元は最終層の units になる
@@ -48,9 +52,11 @@ class BiESN2DClassifier(modules.Classifier):
         for hp, layer_seed in zip(layers, seeds):
             bi_reservoir2ds.append(
                 modules.BiReservoir2D(
-                    input_dim, hp["units"], hp["connectivity"], hp["leaky"], hp["spectral_radius"], layer_seed
+                    input_dim, hp["units"], hp["connectivity"], hp["leaky"], hp["spectral_radius"], hp["input_scaling"], layer_seed
                 )
             )
+            if int(hp["pool_size"]) > 1:
+                bi_reservoir2ds.append(modules.MaxPool2D((int(hp["pool_size"]), int(hp["pool_size"]))))
             input_dim = hp["units"]
 
         self.bi_reservoir2ds = nn.Sequential(*bi_reservoir2ds)

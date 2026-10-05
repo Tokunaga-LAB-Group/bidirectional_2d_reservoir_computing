@@ -24,12 +24,22 @@ class Patchify(nn.Module):
 
 # Fixed-weight leaky-integrator reservoir, single direction.
 # (B, T, input_dim) -> (B, T, units)
+# NOTE: 走査内部の活性化。0=tanh (標準的な ESN)、1=ReLU、2=leaky ReLU(0.01)。
+#       torch.jit.script は関数オブジェクトを引数に取れないので int コードで分岐する。
+#
+#       tanh 以外を使う動機は、BiRC2D を継承した CIRCLE (arXiv:2606.27095) が
+#       leaky ReLU + Kaiming 初期化を採用しているため。有界性は tanh の飽和だけでなく
+#       「slope<=1 の 1-Lipschitz 性 + rho(W)<1」からも得られるので、ReLU 系でも発散しない
+RESERVOIR_ACTS = {"tanh": 0, "relu": 1, "leaky_relu": 2}
+
+
 @torch.jit.script
 def _scan(
     xW: torch.Tensor,
     W_rec: torch.Tensor,
     leaky: float,
     go_backwards: bool,
+    act: int = 0,
 ) -> torch.Tensor:
     B, T, U = xW.shape
     h = torch.zeros(B, U, device=xW.device, dtype=xW.dtype)
@@ -38,7 +48,12 @@ def _scan(
     for i in range(T):
         t = T - 1 - i if go_backwards else i
         pre = torch.addmm(xW[:, t], h, W_rec)
-        h_tilde = torch.tanh(pre)
+        if act == 0:
+            h_tilde = torch.tanh(pre)
+        elif act == 1:
+            h_tilde = torch.relu(pre)
+        else:
+            h_tilde = torch.nn.functional.leaky_relu(pre, 0.01)
         h = torch.lerp(h, h_tilde, leaky)
         out[t] = h
 
@@ -53,18 +68,31 @@ class Reservoir(nn.Module):
         connectivity: float = 0.1,
         leaky: float = 0.9,
         spectral_radius: float = 0.95,
+        input_scaling: float = 1.0,
         seed: int = 0,
+        reservoir_act: str = "tanh",
     ):
         super().__init__()
         self.units = units
+        self.reservoir_act = RESERVOIR_ACTS[reservoir_act]
         self.leaky = leaky
 
         # 乱数ジェネレータを作成
         g = torch.Generator().manual_seed(seed)
 
         # リザバー入力層の固定重みの初期化
-        limit_in = (6.0 / (input_dim + units)) ** 0.5
-        W_in = (torch.rand(input_dim, units, generator=g) * 2 - 1) * limit_in
+        #
+        # NOTE: 標準的な ESN と同じく W_in ~ U(-input_scaling, +input_scaling) とし、
+        #       入力スケーリングをハイパーパラメータとして残す。以前は Glorot
+        #       limit = sqrt(6/(input_dim+units)) で固定していたが、これは fan_out (=units) が
+        #       支配するため、入力次元を減らしても重みの大きさが変わらない。一方 W_in u は
+        #       input_dim 個の項の和なので駆動が sqrt(input_dim) に比例して弱まり、
+        #       パッチサイズを変えると tanh が線形領域に入って特徴が縮退した
+        #       (パッチ 4x4 -> 1x1 で駆動が 1/5、実効次元が 1.7 -> 1.0)。
+        #
+        # NOTE: spectral_radius は W_rec のみを正規化するので、入力側のスケールは補償できない。
+        #       入力スケーリングと再帰スケーリングは独立した自由度である
+        W_in = (torch.rand(input_dim, units, generator=g) * 2 - 1) * input_scaling
 
         # リザバー層の固定重みの初期化
         limit_rec = (6.0 / (units + units)) ** 0.5
@@ -84,7 +112,7 @@ class Reservoir(nn.Module):
     def forward(self, x, go_backwards=False):
         with torch.no_grad():
             xW = x @ self.W_in
-            return _scan(xW, self.W_rec, float(self.leaky), go_backwards)
+            return _scan(xW, self.W_rec, float(self.leaky), go_backwards, self.reservoir_act)
 
 
 # (B, T, input_dim) -> (B, T, output_dim)
@@ -96,7 +124,9 @@ class BiReservoir(nn.Module):
         connectivity: float = 0.1,
         leaky: float = 0.9,
         spectral_radius: float = 0.95,
+        input_scaling: float = 1.0,
         seed: int | tuple[int, int] = 0,
+        reservoir_act: str = "tanh",
     ):
         super().__init__()
         # 順方向・逆方向で異なるシードを使い、リザバーの重みが同一になるのを防ぐ
@@ -114,8 +144,12 @@ class BiReservoir(nn.Module):
         half = output_dim // 2
         self.output_dim = output_dim
 
-        self.forward_reservoir = Reservoir(input_dim, half, connectivity, leaky, spectral_radius, f_seed)
-        self.backward_reservoir = Reservoir(input_dim, half, connectivity, leaky, spectral_radius, b_seed)
+        self.forward_reservoir = Reservoir(
+            input_dim, half, connectivity, leaky, spectral_radius, input_scaling, f_seed, reservoir_act
+        )
+        self.backward_reservoir = Reservoir(
+            input_dim, half, connectivity, leaky, spectral_radius, input_scaling, b_seed, reservoir_act
+        )
 
     def forward(self, inputs):
         fwd = self.forward_reservoir(inputs, go_backwards=False)
@@ -132,7 +166,9 @@ class BiReservoir2D(nn.Module):
         connectivity: float = 0.1,
         leaky: float = 0.9,
         spectral_radius: float = 0.95,
+        input_scaling: float = 1.0,
         seed: int | tuple[int, int, int, int] = 0,
+        reservoir_act: str = "tanh",
     ):
         super().__init__()
         # 4つのリザバー全てに異なるシードを割り当てる
@@ -152,8 +188,12 @@ class BiReservoir2D(nn.Module):
         self.output_dim = output_dim
         half = output_dim // 2
 
-        self.vertical = BiReservoir(input_dim, half, connectivity, leaky, spectral_radius, v_seed)
-        self.horizontal = BiReservoir(input_dim, half, connectivity, leaky, spectral_radius, h_seed)
+        self.vertical = BiReservoir(
+            input_dim, half, connectivity, leaky, spectral_radius, input_scaling, v_seed, reservoir_act
+        )
+        self.horizontal = BiReservoir(
+            input_dim, half, connectivity, leaky, spectral_radius, input_scaling, h_seed, reservoir_act
+        )
 
     def forward(self, inputs):
         B, N_h, N_w, C = inputs.shape
@@ -237,7 +277,9 @@ class ReservoirConv2D(nn.Module):
         padding: int | tuple[int, int] | str = 0,
         connectivity: float = 0.5,
         spectral_radius: float = 0.95,
+        input_scaling: float = 1.0,
         seed: int = 0,
+        reservoir_act: str = "tanh",
     ):
         super().__init__()
         N, K = num_reservoirs, kernel_size
@@ -249,10 +291,18 @@ class ReservoirConv2D(nn.Module):
 
         line_dim = in_channels * K  # 1ステップあたりの入力次元
         self.horizontal = nn.ModuleList(
-            [Reservoir(line_dim, units, connectivity, lk, spectral_radius, seed + i) for i, lk in enumerate(leaks)]
+            [
+                Reservoir(line_dim, units, connectivity, lk, spectral_radius, input_scaling, seed + i, reservoir_act)
+                for i, lk in enumerate(leaks)
+            ]
         )
         self.vertical = nn.ModuleList(
-            [Reservoir(line_dim, units, connectivity, lk, spectral_radius, seed + N + i) for i, lk in enumerate(leaks)]
+            [
+                Reservoir(
+                    line_dim, units, connectivity, lk, spectral_radius, input_scaling, seed + N + i, reservoir_act
+                )
+                for i, lk in enumerate(leaks)
+            ]
         )
         self.output_dim = 2 * N * units
 
@@ -327,6 +377,18 @@ def lecun_uniform(shape: tuple[int, int], generator: torch.Generator) -> torch.T
     return (torch.rand(shape, generator=generator) * 2 - 1) * limit
 
 
+def uniform_fan_in(shape: tuple[int, int], generator: torch.Generator) -> torch.Tensor:
+    """limit = 1/sqrt(fan_in) の一様分布から重みを引く。
+
+    NOTE: nn.Linear / nn.Conv2d の既定初期化 (kaiming_uniform_(a=sqrt(5))) と同じ大きさになる。
+          a=sqrt(5) は gain = sqrt(2/(1+a^2)) = 1/sqrt(3) を与えるので
+          bound = gain * sqrt(3/fan_in) = 1/sqrt(fan_in) に一致する。
+          既定の初期化はグローバル RNG に依存するため、Generator から引き直すためのヘルパ。
+    """
+    limit = shape[0] ** -0.5
+    return (torch.rand(shape, generator=generator) * 2 - 1) * limit
+
+
 def sincos_positions_2d(N_h: int, N_w: int, dim: int) -> torch.Tensor:
     """2 次元の正弦波位置符号 (1, N_h, N_w, dim) を返す。
 
@@ -347,6 +409,33 @@ def sincos_positions_2d(N_h: int, N_w: int, dim: int) -> torch.Tensor:
     enc_w = encode(N_w).reshape(1, N_w, d_axis).expand(N_h, N_w, d_axis)
 
     return torch.cat([enc_h, enc_w], dim=-1).unsqueeze(0).contiguous()  # (1, N_h, N_w, dim)
+
+
+# (B, N_h, N_w, units) -> (B, N_h, N_w, units)
+class AddSinCosPositions2D(nn.Module):
+    """2 次元正弦波位置符号を、埋め込み後の特徴に加算する (ViT と同じ置き方)。
+
+    NOTE: 連結 (ConcatSinCosPositions2D) だと、位置符号の次元がパッチ次元に対して相対的に
+          大きくなったときに入力を支配してしまう。パッチ 1x1 では入力 17〜19 次元のうち
+          16 次元が位置符号となり (84〜94%)、attention が内容ではなく位置だけで決まっていた。
+          埋め込み後に加算すれば次元比の問題が消え、しかも埋め込みは fan_in で正規化されるため
+          特徴のスケールがパッチサイズによらず一定になる (実測 std は P=4 と P=1 で 0.19 対 0.19)。
+
+    NOTE: 符号は単位分散に正規化したうえで pos_scale 倍する。既定 1.0 は「単位分散の符号を
+          等倍で加える」という素直な設定。P=1 では位置符号を切ると精度が壊滅する
+          (MNIST で self_attention 22.2% / criss_cross 17.5%)。1 位置が 1 画素になり、
+          位置情報が無いと画素値の集合しか見えなくなるため。実測の最適値は条件により
+          0.5-2.0 と幅があるが、探索対象を増やさないため固定する
+          (最良との差は 4 組中 最大 1.4 pt)。
+    """
+
+    def __init__(self, N_h: int, N_w: int, units: int, pos_scale: float = 1.0):
+        super().__init__()
+        enc = sincos_positions_2d(N_h, N_w, units)
+        self.register_buffer("encoding", pos_scale * enc / enc.std())
+
+    def forward(self, inputs):
+        return inputs + self.encoding
 
 
 # (B, N_h, N_w, D) -> (B, N_h, N_w, D + dim)
@@ -384,57 +473,52 @@ def criss_cross_mask(N_h: int, N_w: int) -> torch.Tensor:
 # 固定ランダム重みの nn.MultiheadAttention を channel-last の 2 次元格子へ適用する
 # (B, N_h, N_w, input_dim) -> (B, N_h, N_w, units)
 #
-# NOTE: attention の計算そのものは torch の nn.MultiheadAttention をそのまま使い、
-#       重みだけを Generator から引いた固定値で上書きする。本リポジトリの他の classifier と同じく
-#       「特徴抽出側は非訓練、読み出しだけリッジ回帰」という条件に合わせるための最小限の変更である
+# NOTE: attention の計算も重みの初期化も nn.MultiheadAttention の既定をそのまま使う。
+#       本研究は「訓練不要な固定ランダム重みで画像処理がどこまで成立するか」を論じるものなので、
+#       初期化を独自に選ぶと「その選び方の寄与」が結果に混ざる。唯一の変更は、
+#       グローバル RNG ではなく Generator から引くことで seed だけで再現できるようにした点である
 #
-# NOTE: attn_mask を与えると、許可された位置だけを見る attention になる。criss-cross attention
-#       (CCNet, Huang et al. ICCV 2019) は「同じ行・同じ列以外を塞いだ self-attention」と厳密に等価なので、
-#       self_attention と criss_cross_attention はマスク以外すべて同一の実装・同一の重みになる。
-#       両者の差はそのまま「受容野を十字に絞ったことの寄与」として読める
+# NOTE: 既定の初期化は _reset_parameters() の実装通り、
+#         in_proj_weight  -> xavier_uniform_ 、shape が (3*units, units) なので limit = sqrt(6 / 4*units)
+#         out_proj.weight -> 再初期化されないので nn.Linear の既定のまま limit = 1 / sqrt(units)
+#       softmax の温度は 1/sqrt(d_head) が実装に内蔵されており、次元から自動的に決まる。
+#       温度を独立のハイパーパラメータとして持たせるのは既定からの逸脱になるため設けない
+#
+# NOTE: attn_mask を与えると、許可された位置だけを見る attention になる
 class FixedMultiheadAttention2D(nn.Module):
     def __init__(
         self,
         input_dim: int,
         units: int,
-        n_head: int = 4,
-        temperature: float = 1.0,
+        n_head: int = 1,
+        input_scaling: float = 1.0,
         seed: int = 0,
         attn_mask: torch.Tensor | None = None,
+        pos: nn.Module | None = None,
     ):
         super().__init__()
         if units % n_head != 0:
             raise ValueError(f"units must be divisible by n_head, got units={units}, n_head={n_head}.")
-        if temperature <= 0:
-            raise ValueError(f"temperature must be > 0, got {temperature}.")
 
         self.units = units
+        # 位置符号は埋め込み後に加算する (次元比がパッチサイズに依存しないようにするため)
+        self.pos = pos if pos is not None else nn.Identity()
 
         g = torch.Generator().manual_seed(seed)
 
         # NOTE: nn.MultiheadAttention は出力次元が query の次元 (embed_dim) に固定されるため、
         #       units をパッチ次元と独立に選ぶには一度 units へ射影しておく必要がある
-        #       (ViT の patch embedding に相当する)。分散を保つよう LeCun 一様で引く
-        self.register_buffer("W_embed", lecun_uniform((input_dim, units), g))
+        #       (ViT の patch embedding に相当する)。この射影は原典に無く本研究が追加したものなので、
+        #       他の条件と同じく W ~ U(-input_scaling, +input_scaling) とし、スケールを探索対象にする。
+        #       Q/K/V/O は原典 (nn.MultiheadAttention) の既定初期化のまま変更しない
+        self.register_buffer("W_embed", (torch.rand(input_dim, units, generator=g) * 2 - 1) * input_scaling)
 
         self.attention = nn.MultiheadAttention(units, n_head, bias=False, batch_first=True)
 
-        # NOTE: temperature は Q 側の重みを 1/temperature 倍するだけで実現できる。
-        #       nn.MultiheadAttention の 1/sqrt(d_head) は固定だが、
-        #       softmax(qk^T/sqrt(d)) の q を定数倍することと温度を割ることは同じ操作のため、
-        #       attention の実装には一切手を入れずに済む。
-        #       大きくするほど注意が一様に近づき、attention は単なる空間平均へ退化する
-        W_q = lecun_uniform((units, units), g) / float(temperature)
-        W_k = lecun_uniform((units, units), g)
-
-        # V/O は出力そのもののスケールを決めるので、他の classifier と揃えて Glorot にする
-        W_v = glorot_uniform((units, units), g)
-        W_o = glorot_uniform((units, units), g)
-
-        # NOTE: nn.MultiheadAttention は x @ W.T の形で射影するため、転置して詰める
+        # nn.MultiheadAttention の既定初期化を Generator から再現する
         with torch.no_grad():
-            self.attention.in_proj_weight.copy_(torch.cat([W_q.T, W_k.T, W_v.T], dim=0))
-            self.attention.out_proj.weight.copy_(W_o.T)
+            self.attention.in_proj_weight.copy_(glorot_uniform((3 * units, units), g))
+            self.attention.out_proj.weight.copy_(uniform_fan_in((units, units), g))
 
         # 固定重み (非訓練) として扱う
         self.attention.requires_grad_(False)
@@ -448,11 +532,77 @@ class FixedMultiheadAttention2D(nn.Module):
         B, N_h, N_w, _ = inputs.shape
 
         with torch.no_grad():
-            x = (inputs @ self.W_embed).reshape(B, N_h * N_w, self.units)  # (B, T, units)
+            x = self.pos(inputs @ self.W_embed).reshape(B, N_h * N_w, self.units)  # (B, T, units)
 
             out, _ = self.attention(x, x, x, need_weights=False, attn_mask=self.attn_mask)
 
             return out.reshape(B, N_h, N_w, self.units)
+
+
+# CCNet (Huang et al., ICCV 2019) の criss-cross attention を固定ランダム重みで実装する
+# (B, N_h, N_w, input_dim) -> (B, N_h, N_w, units)
+#
+# NOTE: 原典 (github.com/speedinghzl/CCNet, cc_attention/functions.py) の構成をそのまま写す。
+#         - Q/K は 1x1 畳み込みで in_dim//8 へ落とすボトルネック、V は in_dim のまま
+#         - 単一ヘッド
+#         - 1/sqrt(d_k) のスケーリングを行わない
+#         - 出力射影を持たない
+#         - 縦方向と横方向のエネルギーを連結してから 1 回の softmax で正規化する
+#         - INF で H 側の対角を潰し、自分自身が H と W で二重に数えられないようにする
+#       1x1 畳み込みは channel-last の線形層と数学的に同一なので、行列積で書く
+#
+# NOTE: 原典の残差結合 gamma * (out_H + out_W) + x は再現しない。gamma は zeros(1) で初期化されて
+#       学習されるパラメータであり、訓練しない本研究では値を決める根拠が無い (0 のままだと
+#       attention 出力が捨てられて恒等写像になる)。また他の全条件が残差を持たないため、
+#       残差の有無が受容野の比較に混ざるのを避ける
+class CrissCrossAttention2D(nn.Module):
+    def __init__(
+        self, input_dim: int, units: int, input_scaling: float = 1.0, seed: int = 0, pos: nn.Module | None = None
+    ):
+        super().__init__()
+        self.units = units
+        self.pos = pos if pos is not None else nn.Identity()
+        # 原典の in_dim // 8 ボトルネック。units が小さいときも 1 次元は確保する
+        self.inner_dim = max(1, units // 8)
+
+        g = torch.Generator().manual_seed(seed)
+
+        # units をパッチ次元と独立に選ぶための射影 (FixedMultiheadAttention2D と同じ役割)。
+        # 原典に無い要素なので、他の条件と同じくスケールを探索対象にする
+        self.register_buffer("W_embed", (torch.rand(input_dim, units, generator=g) * 2 - 1) * input_scaling)
+
+        # 1x1 畳み込み相当。nn.Conv2d の既定と同じ 1/sqrt(fan_in) で引く (fan_in = in_channels * 1 * 1)
+        self.register_buffer("W_q", uniform_fan_in((units, self.inner_dim), g))
+        self.register_buffer("W_k", uniform_fan_in((units, self.inner_dim), g))
+        self.register_buffer("W_v", uniform_fan_in((units, units), g))
+
+    def forward(self, inputs):
+        with torch.no_grad():
+            B, N_h, N_w, _ = inputs.shape
+            x = self.pos(inputs @ self.W_embed)  # (B, N_h, N_w, units)
+
+            q = x @ self.W_q  # (B, N_h, N_w, inner)
+            k = x @ self.W_k
+            v = x @ self.W_v  # (B, N_h, N_w, units)
+
+            # 縦方向: 同じ列 (N_w 固定) の N_h 個を見る
+            energy_h = torch.einsum("bhwc,bxwc->bhwx", q, k)  # (B, N_h, N_w, N_h)
+            # 自分自身は横方向にも含まれるので、縦側の対角を落として二重計上を防ぐ (原典の INF)
+            eye = torch.eye(N_h, device=x.device, dtype=torch.bool)
+            energy_h = energy_h.masked_fill(eye.view(1, N_h, 1, N_h), float("-inf"))
+
+            # 横方向: 同じ行 (N_h 固定) の N_w 個を見る
+            energy_w = torch.einsum("bhwc,bhyc->bhwy", q, k)  # (B, N_h, N_w, N_w)
+
+            # 縦横を連結して 1 回の softmax で正規化する (原典の Softmax(dim=3))
+            attn = torch.softmax(torch.cat([energy_h, energy_w], dim=-1), dim=-1)
+            att_h, att_w = attn[..., :N_h], attn[..., N_h:]
+
+            out_h = torch.einsum("bhwx,bxwc->bhwc", att_h, v)
+            out_w = torch.einsum("bhwy,bhyc->bhwc", att_w, v)
+
+            return out_h + out_w
+
 
 # 層を積むモデルのハイパーパラメータを層ごとに展開する
 def per_layer_hparams(n_layer: int | None = None, **hparams) -> list[dict]:
