@@ -8,7 +8,7 @@
 ## 0. 最初に読むべきこと
 
 - 本ファイル（方法論の確定事項、運用手順、落とし穴）
-- `runs/exp1_tables.md` — 集計表
+- 集計表は未作成（旧 `runs/exp1_tables.md` は旧設定の表だったため削除済み。§2 の表が現行値）
 - 整理済みの結果ページ: https://claude.ai/artifact/SZ7Qwho1aRSc6FXyTVJgbz
 
 **重要**: 以下の「確定した方法論」は、長い議論と実測を経て決着したもの。
@@ -76,16 +76,19 @@ BiRC2D から 4 点を変更（ランダム畳み込み stem、leaky ReLU、Kaim
 
 `bi_esn2d` の値: MNIST 97.93、Fashion 87.01、CIFAR-10 64.62（いずれも D=2048、P=2）。
 
-### 旧い run（参照用、現行設定ではない）
+### runs/ の中身（2026-10-05 に整理）
 
-| ディレクトリ | 内容 |
-|---|---|
-| `runs/exp1` | 3 seed / 10 trials / P=1 固定 / 位置符号あり。10 trials は TPE が起動せず全ランダムだった |
-| `runs/exp1_p` | 1 seed / 30 trials / P 走査。attention はここの値を使っている |
-| `runs/exp1_p50` | 1 seed / 50 trials（warm start で +20）/ 旧 HP 範囲 |
-| `runs/exp1_patch4` | P=4 固定の旧実験 |
-| `runs/exp1_noscale` | `input_scaling` 導入前 |
-| `exp1_attention_v1` `exp1_convK_tuned_v1` `exp1_p1_glorot_win` `exp3_hybrid` | 本会話より前の実験 |
+`runs/` に残っているのは `exp1_wide` `exp1_grid` `exp1_p` の 3 つだけ。
+`exp1_p` は 1 seed / 30 trials / P 走査 / 旧 HP 範囲で、**attention 2 条件の現行値はここにしかない**
+（他の条件は `exp1_wide` / `exp1_grid` に置き換え済み）。
+
+旧い run（`exp1` `exp1_p50` `exp1_patch4` `exp1_noscale` `exp1_attention_v1` `exp1_convK_tuned_v1`
+`exp1_p1_glorot_win` `exp3_hybrid`）と、旧 `runs/exp1` から作った集計表・図は削除済み。
+本文中のそれらに基づく数値（10 試行 → 30 → 50 の比較など）は記録として残しているが、元データはもう無い。
+
+**注意**: `src/aggregate_exp1.py` `src/make_exp1_tables.py` `src/plot_exp1_hparams.py` と
+`shell/2026-08-17/ex1/common.sh` の既定の `run_root` / `RUN_ROOT` は削除済みの `runs/exp1` を指している。
+使うときは明示的に指定すること。
 
 ---
 
