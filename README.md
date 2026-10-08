@@ -1,5 +1,7 @@
 # Bidirectional 2D Reservoir Computing
 
+**English** | [日本語](README.ja.md)
+
 ## TL;DR
 
 - **Training-free image anomaly detection.** Bidirectional 2D reservoir computing (BiRC2D) extracts features with fixed, randomly initialized echo state networks (ESNs), so the feature extractor needs no training.
